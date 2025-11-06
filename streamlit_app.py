@@ -10,17 +10,17 @@ import fitz  # PyMuPDF
 
 st.set_page_config(page_title="DRAFT Watermark Tool", layout="wide")
 
-# ===== Desired look (matches your target PDF) =====
+# ===== Style: matches your approved look; direction ↗ (bottom-left -> top-right) =====
 DRAFT_TEXT    = "DRAFT"
 DRAFT_COLOR   = (170, 170, 170)   # neutral grey
-DRAFT_ALPHA   = 115               # light fade
-DESIRED_ANGLE = -45               # clockwise diagonal (D bottom-left, T top-right)
-MARGIN_FRAC   = 0.015             # larger word, safe margins
-VERTICAL_OFFSET_FRAC = 0.0        # perfect center
+DRAFT_ALPHA   = 115               # light fade (same as approved)
+DESIRED_ANGLE = 45                # <-- direction bottom-left -> top-right (↗)
+MARGIN_FRAC   = 0.015             # large word, safe margins
+VERTICAL_OFFSET_FRAC = 0.0        # perfect center on every page
 
 IMG_TYPES = {"jpg", "jpeg", "png", "webp", "tif", "tiff", "bmp"}
 
-# ---------- Font loader (forces identical rendering) ----------
+# ---------- Font loader (forces identical rendering everywhere) ----------
 def _load_font(px: int) -> ImageFont.FreeTypeFont:
     # Prefer bundled font in repo
     here = os.path.dirname(__file__)
@@ -64,7 +64,7 @@ def _watermark_rgba(page_w: int, page_h: int, angle_deg: int) -> Image.Image:
     font_size = max(24, int(diag * 0.34))
     font = _load_font(font_size)
 
-    # Draw text on padded tile so corners don't clip
+    # Draw text on padded tile so corners don't clip after rotation
     pad = 120
     tmp = Image.new("RGBA", (10, 10), (255, 255, 255, 0))
     tw, th = _text_size(ImageDraw.Draw(tmp), DRAFT_TEXT, font)
@@ -82,7 +82,7 @@ def _watermark_rgba(page_w: int, page_h: int, angle_deg: int) -> Image.Image:
     # Fit within margins
     mw, mh = int(page_w * MARGIN_FRAC), int(page_h * MARGIN_FRAC)
     max_w, max_h = max(1, page_w - 2 * mw), max(1, page_h - 2 * mh)
-    scale = min(max_w / rx, max_h / ry, 1.0) * 0.978
+    scale = min(max_w / rx, max_h / ry, 1.0) * 0.978  # tiny safety shrink
     if scale < 1.0:
         rotated = rotated.resize(
             (max(1, int(rx * scale)), max(1, int(ry * scale))),
@@ -90,7 +90,7 @@ def _watermark_rgba(page_w: int, page_h: int, angle_deg: int) -> Image.Image:
         )
         rx, ry = rotated.size
 
-    # Exact center + optional nudge
+    # Exact center + optional nudge (kept 0 for true center)
     cx = (page_w - rx) // 2
     cy = (page_h - ry) // 2 + int(page_h * VERTICAL_OFFSET_FRAC)
     canvas.alpha_composite(rotated, dest=(cx, cy))
@@ -100,7 +100,7 @@ def _watermark_rgba(page_w: int, page_h: int, angle_deg: int) -> Image.Image:
 def watermark_image_bytes(src: bytes, ext: str) -> bytes:
     with Image.open(io.BytesIO(src)).convert("RGBA") as base:
         w, h = base.size
-        overlay = _watermark_rgba(w, h, DESIRED_ANGLE)
+        overlay = _watermark_rgba(w, h, DESIRED_ANGLE)  # images have no page-rotation
         out = Image.alpha_composite(base, overlay)
 
         buf = io.BytesIO()
@@ -120,14 +120,14 @@ def watermark_pdf_bytes(src: bytes) -> bytes:
     """
     For every page:
       - read stored rotation (0/90/180/270)
-      - compensate so visible diagonal stays clockwise (-45°)
+      - compensate so visible diagonal stays ↗ (DESIRED_ANGLE)
       - center perfectly
     """
     doc = fitz.open(stream=src, filetype="pdf")
     for p in doc:
         w, h = int(p.rect.width), int(p.rect.height)
         page_rot = (getattr(p, "rotation", 0) or 0) % 360
-        effective_angle = (DESIRED_ANGLE - page_rot) % 360
+        effective_angle = (DESIRED_ANGLE - page_rot) % 360  # same visible direction on all pages
 
         b = io.BytesIO()
         _watermark_rgba(w, h, effective_angle).save(b, "PNG")
@@ -170,8 +170,8 @@ def make_zip(items: List[Tuple[str, bytes]]) -> bytes:
     return mem.getvalue()
 
 # ---------- UI ----------
-st.title("TEST CERTIFICATE → DRAFT Watermark (Clockwise Rotation)")
-st.caption("Now rotated clockwise: D bottom-left, T top-right. Centered, consistent fade and size across all pages.")
+st.title("TEST CERTIFICATE → DRAFT Watermark (↗ direction)")
+st.caption("Direction fixed to bottom-left → top-right. Centered, uniform fade and size across all pages.")
 
 uploaded = st.file_uploader(
     "Choose files (multiple allowed)",
