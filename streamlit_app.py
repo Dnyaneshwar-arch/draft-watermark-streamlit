@@ -8,23 +8,20 @@ import streamlit as st
 from PIL import Image, ImageDraw, ImageFont
 import fitz  # PyMuPDF
 
-# ---------------- App Config ----------------
 st.set_page_config(page_title="DRAFT Watermark Tool", layout="wide")
 
-# Watermark spec to match your sample:
 DRAFT_TEXT = "DRAFT"
-DRAFT_OPACITY = 0.15               # ~15% opacity
-DRAFT_RGB = (190, 190, 190)        # soft gray
-DRAFT_ROTATION = 45                # diagonal
+DRAFT_OPACITY = 0.25               # darker: was 0.15
+DRAFT_RGB = (170, 170, 170)        # darker: was (190,190,190)
+DRAFT_ROTATION = 45
 IMG_TYPES = {"jpg", "jpeg", "png", "webp", "tif", "tiff", "bmp"}
 MAX_FILES = 50
 
 def _load_font(px: int) -> ImageFont.FreeTypeFont:
-    """Try bold system fonts; fallback to default if not found."""
     for path in [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",  # Linux
-        "/Library/Fonts/Arial Bold.ttf",                         # macOS
-        "C:\\Windows\\Fonts\\arialbd.ttf",                       # Windows
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/Library/Fonts/Arial Bold.ttf",
+        "C:\\Windows\\Fonts\\arialbd.ttf",
         "DejaVuSans-Bold.ttf",
     ]:
         if os.path.exists(path):
@@ -35,23 +32,16 @@ def _load_font(px: int) -> ImageFont.FreeTypeFont:
     return ImageFont.load_default()
 
 def _text_size(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont) -> Tuple[int, int]:
-    """
-    Pillow 10+ removed textsize(); use textbbox() and fall back when needed.
-    """
     try:
         bbox = draw.textbbox((0, 0), text, font=font)
         return (bbox[2] - bbox[0], bbox[3] - bbox[1])
     except Exception:
         try:
-            # Older Pillow:
             return draw.textsize(text, font=font)  # type: ignore[attr-defined]
         except Exception:
-            # Last-resort fallback
             return Image.new("L", (1, 1))._new(font.getmask(text)).size
 
-# ---------- Image watermark ----------
 def watermark_image_bytes(src_bytes: bytes, ext_lower: str) -> bytes:
-    """Return watermarked image bytes (keep format)."""
     with Image.open(io.BytesIO(src_bytes)).convert("RGBA") as base:
         w, h = base.size
         diag = (w**2 + h**2) ** 0.5
@@ -59,8 +49,6 @@ def watermark_image_bytes(src_bytes: bytes, ext_lower: str) -> bytes:
         font = _load_font(font_size)
 
         overlay = Image.new("RGBA", base.size, (255, 255, 255, 0))
-
-        # draw text on a separate image, rotate, center-composite
         d = ImageDraw.Draw(overlay)
         tw, th = _text_size(d, DRAFT_TEXT, font)
 
@@ -90,18 +78,12 @@ def watermark_image_bytes(src_bytes: bytes, ext_lower: str) -> bytes:
             out_img.convert("RGB").save(buf, format="PNG")
         return buf.getvalue()
 
-# ---------- PDF watermark (45° via transparent PNG overlay) ----------
 def _make_rotated_text_png(width: int, height: int) -> bytes:
-    """
-    Build a transparent RGBA PNG the size of the PDF page with a centered, rotated
-    DRAFT text at 45° and ~15% opacity.
-    """
     canvas = Image.new("RGBA", (width, height), (255, 255, 255, 0))
     diag = (width**2 + height**2) ** 0.5
     font_size = max(24, int(diag * 0.14))
     font = _load_font(font_size)
 
-    # measure text using Pillow-10-safe approach
     d = ImageDraw.Draw(canvas)
     tw, th = _text_size(d, DRAFT_TEXT, font)
 
@@ -118,27 +100,23 @@ def _make_rotated_text_png(width: int, height: int) -> bytes:
     canvas.alpha_composite(rotated, dest=pos)
 
     out = io.BytesIO()
-    canvas.save(out, format="PNG")  # preserves alpha
+    canvas.save(out, format="PNG")
     out.seek(0)
     return out.getvalue()
 
 def watermark_pdf_bytes(src_bytes: bytes) -> bytes:
-    """Return watermarked PDF bytes (all pages) by overlaying a transparent PNG."""
     doc = fitz.open(stream=src_bytes, filetype="pdf")
     for page in doc:
         rect = page.rect
         w, h = int(rect.width), int(rect.height)
         png_overlay = _make_rotated_text_png(w, h)
-        # Insert the transparent PNG across the full page
         page.insert_image(rect, stream=png_overlay, keep_proportion=False, overlay=True)
     out_buf = io.BytesIO()
     doc.save(out_buf)
     doc.close()
     return out_buf.getvalue()
 
-# ---------- Batch conversion & ZIP ----------
 def convert_many(uploaded_files) -> List[Tuple[str, bytes]]:
-    """Convert all UploadedFile(s) -> list of (new_name, bytes)."""
     results = []
     for uf in uploaded_files:
         name = uf.name
@@ -165,7 +143,6 @@ def make_zip(name_bytes_list: List[Tuple[str, bytes]]) -> bytes:
     mem.seek(0)
     return mem.getvalue()
 
-# ---------------- UI ----------------
 st.title("TEST CERTIFICATE → DRAFT Watermark (Streamlit)")
 st.caption("Upload PDFs / JPG / PNG / WEBP / TIFF. Then click **Convert as a Draft** and **Download Watermarked Files**.")
 
@@ -176,9 +153,8 @@ uploaded = st.file_uploader(
     help="Select one or more PDF/JPG/PNG/WEBP/TIFF files."
 )
 
-# Keep data in session so buttons work naturally
 if "converted" not in st.session_state:
-    st.session_state.converted = []   # list of (filename, bytes)
+    st.session_state.converted = []
 
 col1, col2 = st.columns([1,1])
 
@@ -194,11 +170,9 @@ with col1:
 with col2:
     btn = st.button("Download Watermarked Files (ZIP)", disabled=not uploaded)
     if btn:
-        # If user clicks download without converting, auto-convert:
         if not st.session_state.converted and uploaded:
             with st.spinner("Converting first..."):
                 st.session_state.converted = convert_many(uploaded)
-
         if st.session_state.converted:
             zip_bytes = make_zip(st.session_state.converted)
             st.download_button(
@@ -212,7 +186,6 @@ with col2:
 
 st.write("---")
 
-# Show simple lists
 left, right = st.columns(2)
 with left:
     st.subheader("Uploaded files")
@@ -230,4 +203,4 @@ with right:
     else:
         st.info("Nothing converted yet.")
 
-st.caption("The watermark is big, light-gray, diagonal (45°), ~15% opacity on every page (PDF) and every image.")
+st.caption("The watermark is big, light-gray, diagonal (45°), ~25% opacity on every page (PDF) and every image.")
