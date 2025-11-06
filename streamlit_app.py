@@ -7,19 +7,19 @@ import fitz  # PyMuPDF
 
 st.set_page_config(page_title="DRAFT Watermark Tool", layout="wide")
 
-# ===== Watermark tuning (as requested) =====
-DRAFT_TEXT   = "DRAFT"
-DRAFT_COLOR  = (170, 170, 170)   # neutral grey
-DRAFT_ALPHA  = 115               # more fade (lighter than before; try 110 if you want even lighter)
-DRAFT_ROTATE = 45
-MARGIN_FRAC  = 0.015             # smaller margin => larger watermark (safe)
-CENTER_Y_OFFSET_FRAC = -0.030    # move a bit more upward (−3% of page height)
+# ===== Watermark style (you can tweak these) =====
+DRAFT_TEXT    = "DRAFT"
+DRAFT_COLOR   = (170, 170, 170)   # neutral grey
+DRAFT_ALPHA   = 115               # lighter (more fade). Try 110 for even lighter, 130 for darker
+DESIRED_ANGLE = 45                # the angle you want to SEE in the viewer
+MARGIN_FRAC   = 0.015             # smaller margin => larger watermark (safe)
+# IMPORTANT: keep VERTICAL_OFFSET_FRAC = 0 for true per-page centering
+VERTICAL_OFFSET_FRAC = 0.0        # 0 = perfect center. Use negative to nudge up, positive for down.
 
 IMG_TYPES = {"jpg","jpeg","png","webp","tif","tiff","bmp"}
-MAX_FILES = 50
 
 # ---------- helpers ----------
-def _load_font(px:int)->ImageFont.FreeTypeFont:
+def _load_font(px:int):
     for p in ["/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
               "/Library/Fonts/Arial Bold.ttf",
               "C:\\Windows\\Fonts\\arialbd.ttf",
@@ -29,75 +29,93 @@ def _load_font(px:int)->ImageFont.FreeTypeFont:
             except: pass
     return ImageFont.load_default()
 
-def _text_size(d:ImageDraw.ImageDraw, t:str, f:ImageFont.FreeTypeFont)->Tuple[int,int]:
+def _text_size(d:ImageDraw.ImageDraw, t:str, f:ImageFont.FreeTypeFont):
     try:
         x0,y0,x1,y1 = d.textbbox((0,0), t, font=f); return (x1-x0, y1-y0)
     except:
         try: return d.textsize(t, font=f)  # type: ignore[attr-defined]
         except: return Image.new("L",(1,1))._new(f.getmask(t)).size
 
-def _make_rotated_word_fit(w:int, h:int)->Image.Image:
-    """Centered + rotated 'DRAFT' that auto-fits, slightly higher on page."""
-    canvas = Image.new("RGBA",(w,h),(255,255,255,0))
+def _watermark_rgba(w:int, h:int, angle:int)->Image.Image:
+    """
+    Build an RGBA image the size of the page (w x h) with a single,
+    centered, rotated DRAFT word. 'angle' is already compensated for
+    the PDF page's own rotation.
+    """
+    canvas = Image.new("RGBA", (w, h), (255,255,255,0))
     diag = (w**2 + h**2) ** 0.5
 
-    # Bigger start size; final fit caps safely
-    font_size = max(24, int(diag * 0.34))     # ↑ larger than before
+    # Start very large; final fit will cap safely
+    font_size = max(24, int(diag * 0.34))     # big
     font = _load_font(font_size)
 
-    # Generous padding to protect corners when rotated
-    pad = 120
-    tmp = Image.new("RGBA",(10,10),(255,255,255,0))
+    pad = 120  # protects corners after rotation
+    tmp = Image.new("RGBA", (10,10), (255,255,255,0))
     tw,th = _text_size(ImageDraw.Draw(tmp), DRAFT_TEXT, font)
-    tile = Image.new("RGBA",(tw+2*pad, th+2*pad),(255,255,255,0))
+    tile = Image.new("RGBA", (tw+2*pad, th+2*pad), (255,255,255,0))
     ImageDraw.Draw(tile).text(
-        (pad,pad), DRAFT_TEXT, font=font,
+        (pad, pad), DRAFT_TEXT, font=font,
         fill=(DRAFT_COLOR[0], DRAFT_COLOR[1], DRAFT_COLOR[2], DRAFT_ALPHA)
     )
 
-    # Rotate and fit to page with tiny safety shrink
-    rotated = tile.rotate(DRAFT_ROTATE, expand=True)
-    rx,ry = rotated.size
+    rotated = tile.rotate(angle, expand=True)
+    rx, ry = rotated.size
 
     mw, mh = int(w*MARGIN_FRAC), int(h*MARGIN_FRAC)
-    max_w, max_h = max(1,w-2*mw), max(1,h-2*mh)
+    max_w, max_h = max(1, w-2*mw), max(1, h-2*mh)
 
-    scale = min(max_w/rx, max_h/ry, 1.0) * 0.978   # a hair larger but still safe
+    # fit with tiny safety shrink so it never touches edges
+    scale = min(max_w/rx, max_h/ry, 1.0) * 0.978
     if scale < 1.0:
         rotated = rotated.resize((max(1,int(rx*scale)), max(1,int(ry*scale))), Image.LANCZOS)
-        rx,ry = rotated.size
+        rx, ry = rotated.size
 
-    # Center + slight upward shift
+    # exact center + optional tiny vertical nudge (0 by default)
     cx = (w - rx) // 2
-    cy = (h - ry) // 2 + int(h * CENTER_Y_OFFSET_FRAC)  # negative = up
+    cy = (h - ry) // 2 + int(h * VERTICAL_OFFSET_FRAC)
     canvas.alpha_composite(rotated, dest=(cx, cy))
     return canvas
 
 # ---------- converters ----------
 def watermark_image_bytes(src:bytes, ext:str)->bytes:
     with Image.open(io.BytesIO(src)).convert("RGBA") as base:
-        w,h = base.size
-        overlay = _make_rotated_word_fit(w,h)
+        w, h = base.size
+        # images never carry PDF rotation; just use desired angle
+        overlay = _watermark_rgba(w, h, DESIRED_ANGLE % 360)
         out = Image.alpha_composite(base, overlay)
         buf = io.BytesIO()
-        if ext in ("jpg","jpeg"): out.convert("RGB").save(buf,"JPEG",quality=95,subsampling=1)
-        elif ext=="png": out.save(buf,"PNG")
-        elif ext=="webp": out.convert("RGB").save(buf,"WEBP",quality=95)
-        elif ext in ("tif","tiff"): out.convert("RGB").save(buf,"TIFF")
-        else: out.convert("RGB").save(buf,"PNG")
+        if ext in ("jpg","jpeg"): out.convert("RGB").save(buf, "JPEG", quality=95, subsampling=1)
+        elif ext == "png":       out.save(buf, "PNG")
+        elif ext == "webp":      out.convert("RGB").save(buf, "WEBP", quality=95)
+        elif ext in ("tif","tiff"): out.convert("RGB").save(buf, "TIFF")
+        else: out.convert("RGB").save(buf, "PNG")
         return buf.getvalue()
 
 def watermark_pdf_bytes(src:bytes)->bytes:
+    """
+    For each page:
+    - read its rotation (0/90/180/270)
+    - compensate so the VISIBLE angle is always DESIRED_ANGLE
+      regardless of page rotation in the PDF.
+    - center the word exactly on that page.
+    """
     doc = fitz.open(stream=src, filetype="pdf")
     for p in doc:
-        w,h = int(p.rect.width), int(p.rect.height)
+        w, h = int(p.rect.width), int(p.rect.height)
+
+        # PyMuPDF exposes rotation as degrees clockwise.
+        page_rot = (getattr(p, "rotation", 0) or 0) % 360
+        # To keep the visible angle constant, subtract page rotation.
+        effective_angle = (DESIRED_ANGLE - page_rot) % 360
+
         b = io.BytesIO()
-        _make_rotated_word_fit(w,h).save(b,"PNG")
+        _watermark_rgba(w, h, effective_angle).save(b, "PNG")
         p.insert_image(p.rect, stream=b.getvalue(), keep_proportion=False, overlay=True)
+
     out = io.BytesIO(); doc.save(out); doc.close()
     return out.getvalue()
 
-def convert_many(files)->List[Tuple[str,bytes]]:
+def convert_many(files):
     out=[]
     for f in files:
         name=f.name; ext=name.rsplit(".",1)[-1].lower() if "." in name else ""
@@ -114,13 +132,13 @@ def convert_many(files)->List[Tuple[str,bytes]]:
 
 def make_zip(items:List[Tuple[str,bytes]])->bytes:
     mem = io.BytesIO()
-    with zipfile.ZipFile(mem,"w",zipfile.ZIP_DEFLATED) as z:
-        for fn,b in items: z.writestr(fn,b)
+    with zipfile.ZipFile(mem, "w", zipfile.ZIP_DEFLATED) as z:
+        for fn,b in items: z.writestr(fn, b)
     mem.seek(0); return mem.getvalue()
 
 # ---------- UI ----------
 st.title("TEST CERTIFICATE → DRAFT Watermark (Streamlit)")
-st.caption("Lighter, larger, and slightly higher. Applied to every page of PDFs.")
+st.caption("Consistent CENTER + consistent DIAGONAL across all PDF pages (rotation-compensated).")
 
 uploaded = st.file_uploader("Choose files (multiple allowed)",
                             type=list(IMG_TYPES|{"pdf"}), accept_multiple_files=True)
