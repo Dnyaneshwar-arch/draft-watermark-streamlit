@@ -7,17 +7,18 @@ import fitz  # PyMuPDF
 
 st.set_page_config(page_title="DRAFT Watermark Tool", layout="wide")
 
-# ---- Watermark tuning (as requested) ----
+# ===== Watermark tuning (as requested) =====
 DRAFT_TEXT   = "DRAFT"
-DRAFT_COLOR  = (170, 170, 170)   # neutral gray
-DRAFT_ALPHA  = 140               # zyada visible (pehle 120 tha)
+DRAFT_COLOR  = (170, 170, 170)   # neutral grey
+DRAFT_ALPHA  = 115               # more fade (lighter than before; try 110 if you want even lighter)
 DRAFT_ROTATE = 45
-MARGIN_FRAC  = 0.018             # aur bada size (pehle 0.02 / 0.03 tha)
-CENTER_Y_OFFSET_FRAC = -0.02     # 2% upar shift (negative = up)
+MARGIN_FRAC  = 0.015             # smaller margin => larger watermark (safe)
+CENTER_Y_OFFSET_FRAC = -0.030    # move a bit more upward (−3% of page height)
 
 IMG_TYPES = {"jpg","jpeg","png","webp","tif","tiff","bmp"}
 MAX_FILES = 50
 
+# ---------- helpers ----------
 def _load_font(px:int)->ImageFont.FreeTypeFont:
     for p in ["/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
               "/Library/Fonts/Arial Bold.ttf",
@@ -40,12 +41,12 @@ def _make_rotated_word_fit(w:int, h:int)->Image.Image:
     canvas = Image.new("RGBA",(w,h),(255,255,255,0))
     diag = (w**2 + h**2) ** 0.5
 
-    # Start even larger; fit will cap safely
-    font_size = max(24, int(diag * 0.32))    # bada start (pehle 0.30/0.28)
+    # Bigger start size; final fit caps safely
+    font_size = max(24, int(diag * 0.34))     # ↑ larger than before
     font = _load_font(font_size)
 
-    # Generous padding protects corners after rotation
-    pad = 110
+    # Generous padding to protect corners when rotated
+    pad = 120
     tmp = Image.new("RGBA",(10,10),(255,255,255,0))
     tw,th = _text_size(ImageDraw.Draw(tmp), DRAFT_TEXT, font)
     tile = Image.new("RGBA",(tw+2*pad, th+2*pad),(255,255,255,0))
@@ -54,24 +55,25 @@ def _make_rotated_word_fit(w:int, h:int)->Image.Image:
         fill=(DRAFT_COLOR[0], DRAFT_COLOR[1], DRAFT_COLOR[2], DRAFT_ALPHA)
     )
 
-    # Rotate and fit within margins (tiny safety shrink)
+    # Rotate and fit to page with tiny safety shrink
     rotated = tile.rotate(DRAFT_ROTATE, expand=True)
     rx,ry = rotated.size
 
     mw, mh = int(w*MARGIN_FRAC), int(h*MARGIN_FRAC)
     max_w, max_h = max(1,w-2*mw), max(1,h-2*mh)
 
-    scale = min(max_w/rx, max_h/ry, 1.0) * 0.980   # thoda aur bada (safe)
+    scale = min(max_w/rx, max_h/ry, 1.0) * 0.978   # a hair larger but still safe
     if scale < 1.0:
         rotated = rotated.resize((max(1,int(rx*scale)), max(1,int(ry*scale))), Image.LANCZOS)
         rx,ry = rotated.size
 
-    # Perfect center + slight upward shift
+    # Center + slight upward shift
     cx = (w - rx) // 2
-    cy = (h - ry) // 2 + int(h * CENTER_Y_OFFSET_FRAC)  # negative => up
+    cy = (h - ry) // 2 + int(h * CENTER_Y_OFFSET_FRAC)  # negative = up
     canvas.alpha_composite(rotated, dest=(cx, cy))
     return canvas
 
+# ---------- converters ----------
 def watermark_image_bytes(src:bytes, ext:str)->bytes:
     with Image.open(io.BytesIO(src)).convert("RGBA") as base:
         w,h = base.size
@@ -116,8 +118,9 @@ def make_zip(items:List[Tuple[str,bytes]])->bytes:
         for fn,b in items: z.writestr(fn,b)
     mem.seek(0); return mem.getvalue()
 
+# ---------- UI ----------
 st.title("TEST CERTIFICATE → DRAFT Watermark (Streamlit)")
-st.caption("Bigger, slightly darker, and shifted a little upward. Applies to every PDF page.")
+st.caption("Lighter, larger, and slightly higher. Applied to every page of PDFs.")
 
 uploaded = st.file_uploader("Choose files (multiple allowed)",
                             type=list(IMG_TYPES|{"pdf"}), accept_multiple_files=True)
