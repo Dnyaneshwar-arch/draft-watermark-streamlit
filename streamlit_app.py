@@ -10,26 +10,29 @@ import fitz  # PyMuPDF
 
 st.set_page_config(page_title="DRAFT Watermark Tool", layout="wide")
 
-# ===== Style (approved look). Direction is bottom-left -> top-right (↗). =====
+# ===== Approved visual style =====
 DRAFT_TEXT    = "DRAFT"
-DRAFT_COLOR   = (170, 170, 170)   # neutral grey
-DRAFT_ALPHA   = 115               # light fade
-DESIRED_ANGLE = -45               # *** Use -45 so D starts bottom-left and T goes top-right ***
-MARGIN_FRAC   = 0.015             # large word, safe margins
-VERTICAL_OFFSET_FRAC = 0.0        # perfect center on every page
+DRAFT_COLOR   = (170, 170, 170)  # neutral grey
+DRAFT_ALPHA   = 115              # light fade
+# We want bottom-left -> top-right. With Pillow's screen coords (y down),
+# that direction uses a clockwise rotation of -45 degrees.
+BASE_ANGLE    = -45
+
+# Margins and scale
+MARGIN_FRAC   = 0.015            # ~1.5% page margins all around
+FONT_DIAG_FRAC = 0.34            # base scale vs page diagonal (same look as before)
 
 IMG_TYPES = {"jpg", "jpeg", "png", "webp", "tif", "tiff", "bmp"}
 
-# ---------- Font loader (forces identical rendering everywhere) ----------
+# ---------- Font loader ----------
 def _load_font(px: int) -> ImageFont.FreeTypeFont:
     here = os.path.dirname(__file__)
-    font_here = os.path.join(here, "DejaVuSans-Bold.ttf")
-    if os.path.exists(font_here):
+    prefer = os.path.join(here, "DejaVuSans-Bold.ttf")
+    if os.path.exists(prefer):
         try:
-            return ImageFont.truetype(font_here, px)
+            return ImageFont.truetype(prefer, px)
         except Exception:
             pass
-
     for p in [
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
         "/Library/Fonts/Arial Bold.ttf",
@@ -53,15 +56,13 @@ def _text_size(d: ImageDraw.ImageDraw, t: str, f: ImageFont.FreeTypeFont) -> Tup
         except Exception:
             return Image.new("L", (1, 1))._new(f.getmask(t)).size
 
-# ---------- Build a centered, rotated RGBA watermark ----------
-def _watermark_rgba(page_w: int, page_h: int, angle_deg: int) -> Image.Image:
-    canvas = Image.new("RGBA", (page_w, page_h), (255, 255, 255, 0))
+# ---------- Make rotated watermark tile (RGBA) ----------
+def _make_rotated_tile(page_w: int, page_h: int, angle_deg: int) -> Image.Image:
     diag = (page_w**2 + page_h**2) ** 0.5
-
-    # Start large; scale-to-fit will cap it safely to page
-    font_size = max(24, int(diag * 0.34))
+    font_size = max(24, int(diag * FONT_DIAG_FRAC))
     font = _load_font(font_size)
 
+    # draw on padded tile so rotation doesn't clip edges
     pad = 120
     tmp = Image.new("RGBA", (10, 10), (255, 255, 255, 0))
     tw, th = _text_size(ImageDraw.Draw(tmp), DRAFT_TEXT, font)
@@ -72,30 +73,86 @@ def _watermark_rgba(page_w: int, page_h: int, angle_deg: int) -> Image.Image:
         font=font,
         fill=(DRAFT_COLOR[0], DRAFT_COLOR[1], DRAFT_COLOR[2], DRAFT_ALPHA),
     )
-
     rotated = tile.rotate(angle_deg % 360, expand=True)
-    rx, ry = rotated.size
+    return rotated
 
-    mw, mh = int(page_w * MARGIN_FRAC), int(page_h * MARGIN_FRAC)
-    max_w, max_h = max(1, page_w - 2 * mw), max(1, page_h - 2 * mh)
-    scale = min(max_w / rx, max_h / ry, 1.0) * 0.978
+# ---------- Compute placement to start at bottom-left corner ----------
+def _place_bottomleft_to_topright(page_w: int, page_h: int, rotated: Image.Image) -> Tuple[int, int, Image.Image]:
+    """Scale and position rotated tile so its bounding box fits within margins,
+    and its LOWER-LEFT corner sits near the page's bottom-left margin.
+    This produces the visual: text runs from bottom-left toward top-right (↗),
+    with 'D' starting near bottom-left.
+    """
+    rx, ry = rotated.size
+    mx, my = int(page_w * MARGIN_FRAC), int(page_h * MARGIN_FRAC)
+    max_w, max_h = max(1, page_w - 2 * mx), max(1, page_h - 2 * my)
+
+    # scale to fit within page box (respect both width & height limits)
+    scale = min(max_w / rx, max_h / ry, 1.0) * 0.978  # tiny safety shrink
     if scale < 1.0:
-        rotated = rotated.resize(
-            (max(1, int(rx * scale)), max(1, int(ry * scale))),
-            Image.LANCZOS,
-        )
+        rotated = rotated.resize((max(1, int(rx * scale)), max(1, int(ry * scale))), Image.LANCZOS)
         rx, ry = rotated.size
 
-    cx = (page_w - rx) // 2
-    cy = (page_h - ry) // 2 + int(page_h * VERTICAL_OFFSET_FRAC)
-    canvas.alpha_composite(rotated, dest=(cx, cy))
-    return canvas
+    # place so the rotated image's LOWER-LEFT corner touches the page's bottom-left margin
+    # In PIL, dest is the top-left of the rotated image's bounding box.
+    # For our -45° tile, the lower-left of the bounding box is at (x0, y0 + ry).
+    # To align that to (mx, page_h - my), we set:
+    x = mx
+    y = page_h - my - ry
+    return x, y, rotated
 
-# ---------- Converters ----------
+# General helper to use for any angle quadrant
+def _place_for_angle(page_w: int, page_h: int, rotated: Image.Image, angle_deg: int) -> Tuple[int, int, Image.Image]:
+    """Place by corners depending on the effective angle.
+    We only use -45 (↗) here, but this safely supports any compensated angle
+    caused by PDF page rotation.
+    """
+    rx, ry = rotated.size
+    mx, my = int(page_w * MARGIN_FRAC), int(page_h * MARGIN_FRAC)
+    max_w, max_h = max(1, page_w - 2 * mx), max(1, page_h - 2 * my)
+
+    scale = min(max_w / rx, max_h / ry, 1.0) * 0.978
+    if scale < 1.0:
+        rotated = rotated.resize((max(1, int(rx * scale)), max(1, int(ry * scale))), Image.LANCZOS)
+        rx, ry = rotated.size
+
+    ang = angle_deg % 360
+
+    # Map common diagonals to corners:
+    # 315/-45: bottom-left -> top-right => lower-left at (mx, page_h - my)
+    if 300 <= ang or ang < 30:  # treat 315±15 as -45-ish
+        x = mx
+        y = page_h - my - ry
+        return x, y, rotated
+    # 45: top-left -> bottom-right => upper-left at (mx, my)
+    if 30 <= ang < 60:
+        x = mx
+        y = my
+        return x, y, rotated
+    # 135: bottom-right -> top-left => lower-right at (page_w - mx, page_h - my)
+    if 120 <= ang < 150:
+        x = page_w - mx - rx
+        y = page_h - my - ry
+        return x, y, rotated
+    # 225: top-right -> bottom-left => upper-right at (page_w - mx, my)
+    if 210 <= ang < 240:
+        x = page_w - mx - rx
+        y = my
+        return x, y, rotated
+
+    # Fallback: center
+    x = (page_w - rx) // 2
+    y = (page_h - ry) // 2
+    return x, y, rotated
+
+# ---------- Image conversion ----------
 def watermark_image_bytes(src: bytes, ext: str) -> bytes:
     with Image.open(io.BytesIO(src)).convert("RGBA") as base:
         w, h = base.size
-        overlay = _watermark_rgba(w, h, DESIRED_ANGLE)  # images: no page-rotation
+        rotated = _make_rotated_tile(w, h, BASE_ANGLE)
+        x, y, rotated = _place_for_angle(w, h, rotated, BASE_ANGLE)
+        overlay = Image.new("RGBA", (w, h), (255, 255, 255, 0))
+        overlay.alpha_composite(rotated, dest=(x, y))
         out = Image.alpha_composite(base, overlay)
 
         buf = io.BytesIO()
@@ -111,23 +168,28 @@ def watermark_image_bytes(src: bytes, ext: str) -> bytes:
             out.convert("RGB").save(buf, "PNG")
         return buf.getvalue()
 
+# ---------- PDF conversion ----------
 def watermark_pdf_bytes(src: bytes) -> bytes:
-    """
-    For every page:
-      - read stored rotation (0/90/180/270)
-      - compensate so visible diagonal is always bottom-left -> top-right (↗)
-      - center perfectly on the page
+    """For every page, keep visible direction bottom-left -> top-right.
+    Compensate for page rotation and place by corners so 'D' starts at bottom-left.
     """
     doc = fitz.open(stream=src, filetype="pdf")
     for p in doc:
-        w, h = int(p.rect.width), int(p.rect.height)
+        rect = p.rect
+        w, h = int(rect.width), int(rect.height)
         page_rot = (getattr(p, "rotation", 0) or 0) % 360
-        effective_angle = (DESIRED_ANGLE - page_rot) % 360
+        effective_angle = (BASE_ANGLE - page_rot) % 360
+
+        rotated = _make_rotated_tile(w, h, effective_angle)
+        x, y, rotated = _place_for_angle(w, h, rotated, effective_angle)
 
         b = io.BytesIO()
-        _watermark_rgba(w, h, effective_angle).save(b, "PNG")
+        overlay = Image.new("RGBA", (w, h), (255, 255, 255, 0))
+        overlay.alpha_composite(rotated, dest=(x, y))
+        overlay.save(b, "PNG")
+
         p.insert_image(
-            p.rect,
+            rect,
             stream=b.getvalue(),
             keep_proportion=False,
             overlay=True,
@@ -165,8 +227,8 @@ def make_zip(items: List[Tuple[str, bytes]]) -> bytes:
     return mem.getvalue()
 
 # ---------- UI ----------
-st.title("TEST CERTIFICATE → DRAFT Watermark (↗ bottom-left to top-right)")
-st.caption("Direction fixed so 'D' starts bottom-left and 'T' ends near top-right. Centered, consistent size & fade.")
+st.title("TEST CERTIFICATE → DRAFT Watermark (Bottom-Left → Top-Right)")
+st.caption("‘DRAFT’ starts near bottom-left and spans to top-right on every page. Same font/size/fade as approved.")
 
 uploaded = st.file_uploader(
     "Choose files (multiple allowed)",
@@ -189,10 +251,10 @@ with c1:
 
 with c2:
     if st.button("Download Watermarked Files (ZIP)", disabled=not uploaded):
-        if st.session_state.converted or uploaded:
-            if not st.session_state.converted:
-                with st.spinner("Converting first..."):
-                    st.session_state.converted = convert_many(uploaded)
+        if not st.session_state.converted and uploaded:
+            with st.spinner("Converting first..."):
+                st.session_state.converted = convert_many(uploaded)
+        if st.session_state.converted:
             st.download_button(
                 "Click to Save ZIP",
                 data=make_zip(st.session_state.converted),
