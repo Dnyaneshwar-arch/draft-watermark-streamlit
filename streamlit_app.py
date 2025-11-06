@@ -14,9 +14,9 @@ st.set_page_config(page_title="DRAFT Watermark Tool", layout="wide")
 # Watermark look (simple, visible, never clipped)
 DRAFT_TEXT   = "DRAFT"
 DRAFT_COLOR  = (170, 170, 170)   # neutral gray
-DRAFT_ALPHA  = 180               # 0..255 (≈70% opaque → more fade)
+DRAFT_ALPHA  = 150               # lighter (~60% opaque)  ← was 180
 DRAFT_ROTATE = 45                # diagonal
-MARGIN_FRAC  = 0.10              # 10% page/photo margin for safety
+MARGIN_FRAC  = 0.07              # 7% page/photo margin  ← was 0.10
 
 IMG_TYPES = {"jpg", "jpeg", "png", "webp", "tif", "tiff", "bmp"}
 MAX_FILES = 50
@@ -57,15 +57,14 @@ def _make_rotated_word_fit(w: int, h: int) -> Image.Image:
 
     # Start big (based on diagonal) — we’ll scale down to fit.
     diag = (w**2 + h**2) ** 0.5
-    font_size = max(24, int(diag * 0.22))  # start a bit larger than needed
+    font_size = max(24, int(diag * 0.22))  # generous start; final size capped by fit
     font = _load_font(font_size)
 
-    # Draw the word on a padded tile (extra padding prevents rotated edge cuts)
-    # padding: 60px all around
+    # Draw the word on a padded tile (padding prevents rotated edge cuts)
+    pad = 60
     tmp = Image.new("RGBA", (10, 10), (255, 255, 255, 0))
     dtmp = ImageDraw.Draw(tmp)
     tw, th = _text_size(dtmp, DRAFT_TEXT, font)
-    pad = 60
     tight = Image.new("RGBA", (tw + 2 * pad, th + 2 * pad), (255, 255, 255, 0))
     ImageDraw.Draw(tight).text(
         (pad, pad),
@@ -84,8 +83,8 @@ def _make_rotated_word_fit(w: int, h: int) -> Image.Image:
     max_w = max(1, w - 2 * margin_w)
     max_h = max(1, h - 2 * margin_h)
 
-    # Scale to fit; apply a tiny 2% shrink to ensure safety
-    scale = min(max_w / rx, max_h / ry, 1.0) * 0.98
+    # Scale to fit; very small shrink to ensure safety (make it as big as possible)
+    scale = min(max_w / rx, max_h / ry, 1.0) * 0.992   # ← was 0.98
     if scale < 1.0:
         new_size = (max(1, int(rx * scale)), max(1, int(ry * scale)))
         rotated = rotated.resize(new_size, resample=Image.LANCZOS)
@@ -161,7 +160,7 @@ def make_zip(name_bytes_list: List[Tuple[str, bytes]]) -> bytes:
 
 # ---------------- UI ----------------
 st.title("TEST CERTIFICATE → DRAFT Watermark (Streamlit)")
-st.caption("Watermark auto-fits with margins and prints on every PDF page. Fade adjusted so table text stays readable.")
+st.caption("Watermark auto-fits with margins and prints on every PDF page. Slightly lighter and larger now.")
 
 uploaded = st.file_uploader(
     "Choose files (multiple allowed)",
