@@ -1,4 +1,4 @@
-# streamlit_app.py  —  bottom-left → top-right (↗) watermark, same on every page
+# streamlit_app.py — DRAFT watermark centered on every page
 import io
 import os
 import zipfile
@@ -8,15 +8,14 @@ import streamlit as st
 from PIL import Image, ImageDraw, ImageFont
 import fitz  # PyMuPDF
 
-st.set_page_config(page_title="DRAFT Watermark ↗ (consistent)", layout="wide")
+st.set_page_config(page_title="DRAFT Watermark (Centered)", layout="wide")
 
-# ===== Appearance (kept same look) =====
+# ===== Visual settings =====
 DRAFT_TEXT     = "DRAFT"
 DRAFT_COLOR    = (170, 170, 170)   # light grey
-DRAFT_ALPHA    = 115               # fade
-BASE_ANGLE_DEG = -45               # ↗ in Pillow (clockwise)
-MARGIN_FRAC    = 0.015             # 1.5% page margin
-FONT_DIAG_FRAC = 0.34              # word size vs page diagonal (same feel as before)
+DRAFT_ALPHA    = 115               # fade (0–255)
+BASE_ANGLE_DEG = -45               # diagonal ↗ (clockwise in Pillow)
+FONT_DIAG_FRAC = 0.34              # size vs page diagonal (feel you liked)
 
 IMG_TYPES = {"jpg", "jpeg", "png", "webp", "tif", "tiff", "bmp"}
 
@@ -52,12 +51,14 @@ def _text_size(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFon
         except Exception:
             return Image.new("L", (1, 1))._new(font.getmask(text)).size
 
-# ---------- Build rotated word (no centering) ----------
+# ---------- Build rotated word ----------
 def _build_rotated_word(page_w: int, page_h: int, angle_deg: int) -> Image.Image:
+    # scale by diagonal for consistent feel
     diag = (page_w**2 + page_h**2) ** 0.5
     font_size = max(24, int(diag * FONT_DIAG_FRAC))
     font = _load_font(font_size)
 
+    # draw to padded tile then rotate for clean edges
     pad = 120
     tmp = Image.new("RGBA", (10, 10), (255, 255, 255, 0))
     tw, th = _text_size(ImageDraw.Draw(tmp), DRAFT_TEXT, font)
@@ -72,28 +73,24 @@ def _build_rotated_word(page_w: int, page_h: int, angle_deg: int) -> Image.Image
 
 def _scale_to_fit(rot: Image.Image, page_w: int, page_h: int) -> Image.Image:
     rx, ry = rot.size
-    mx, my = int(page_w * MARGIN_FRAC), int(page_h * MARGIN_FRAC)
-    max_w, max_h = max(1, page_w - 2 * mx), max(1, page_h - 2 * my)
-    scale = min(max_w / rx, max_h / ry, 1.0) * 0.978  # tiny safety to avoid clipping
+    # fit inside page with a tiny safety so it never clips
+    scale = min(page_w / rx, page_h / ry, 1.0) * 0.96
     if scale < 1.0:
         rot = rot.resize((max(1, int(rx * scale)), max(1, int(ry * scale))), Image.LANCZOS)
     return rot
 
-def _anchor_bottom_left(page_w: int, page_h: int, rot: Image.Image) -> Tuple[int, int]:
-    """Position the rotated image so its LOWER-LEFT sits at the page's bottom-left margin."""
+def _center_position(page_w: int, page_h: int, rot: Image.Image) -> Tuple[int, int]:
     rx, ry = rot.size
-    mx, my = int(page_w * MARGIN_FRAC), int(page_h * MARGIN_FRAC)
-    x = mx
-    y = page_h - my - ry
-    return x, y
+    return ( (page_w - rx) // 2, (page_h - ry) // 2 )
 
-# ---------- Convert: Images ----------
+# ---------- Images ----------
 def watermark_image_bytes(src: bytes, ext: str) -> bytes:
     with Image.open(io.BytesIO(src)).convert("RGBA") as base:
         w, h = base.size
         rot = _build_rotated_word(w, h, BASE_ANGLE_DEG)
         rot = _scale_to_fit(rot, w, h)
-        x, y = _anchor_bottom_left(w, h, rot)
+        x, y = _center_position(w, h, rot)
+
         overlay = Image.new("RGBA", (w, h), (255, 255, 255, 0))
         overlay.alpha_composite(rot, dest=(x, y))
         out = Image.alpha_composite(base, overlay)
@@ -111,35 +108,32 @@ def watermark_image_bytes(src: bytes, ext: str) -> bytes:
             out.convert("RGB").save(buf, "PNG")
         return buf.getvalue()
 
-# ---------- Convert: PDFs ----------
+# ---------- PDFs ----------
 def watermark_pdf_bytes(src: bytes) -> bytes:
     """
-    Ensure identical visual alignment on every page:
-    - Anchor at bottom-left margin
-    - Diagonal ↗
-    - Normalize by page.rotation so the viewer always shows the same direction
+    Center the word on every page AND keep diagonal consistent even if PDF pages
+    have a rotation flag. We add page.rotation to the draw angle so the viewer
+    always shows the same ↗ orientation while staying centered.
     """
     doc = fitz.open(stream=src, filetype="pdf")
     for page in doc:
         rect = page.rect
         w, h = int(rect.width), int(rect.height)
 
-        # Normalize by the page’s rotation flag so the visible direction stays ↗ everywhere.
         page_rot = (getattr(page, "rotation", 0) or 0) % 360
-        angle_for_view = (BASE_ANGLE_DEG + page_rot) % 360  # NOTE: add, not subtract
+        angle_for_view = (BASE_ANGLE_DEG + page_rot) % 360
 
         rot = _build_rotated_word(w, h, angle_for_view)
         rot = _scale_to_fit(rot, w, h)
-        x, y = _anchor_bottom_left(w, h, rot)
+        x, y = _center_position(w, h, rot)
 
-        # Paint a transparent PNG overlay then insert it—works on all PDFs consistently.
         overlay = Image.new("RGBA", (w, h), (255, 255, 255, 0))
         overlay.alpha_composite(rot, dest=(x, y))
         buf = io.BytesIO()
         overlay.save(buf, "PNG")
 
         page.insert_image(
-            rect,               # whole page
+            rect,
             stream=buf.getvalue(),
             keep_proportion=False,
             overlay=True,
@@ -177,8 +171,8 @@ def make_zip(items: List[Tuple[str, bytes]]) -> bytes:
     return mem.getvalue()
 
 # ---------- UI ----------
-st.title("DRAFT watermark ↗ (bottom-left → top-right, consistent on all pages)")
-st.caption("‘D’ starts at the bottom-left margin; ‘T’ reaches toward the top-right — same alignment everywhere.")
+st.title("DRAFT watermark — centered")
+st.caption("Applies a light, diagonal DRAFT watermark centered on every page (images & PDFs).")
 
 uploaded = st.file_uploader(
     "Upload PDFs / JPG / PNG / WEBP / TIFF (multiple allowed)",
@@ -189,8 +183,8 @@ uploaded = st.file_uploader(
 if "converted" not in st.session_state:
     st.session_state.converted = []
 
-c1, c2 = st.columns(2)
-with c1:
+col1, col2 = st.columns(2)
+with col1:
     if st.button("Convert as a Draft", type="primary", disabled=not uploaded):
         if not uploaded:
             st.error("Please upload files first.")
@@ -198,7 +192,7 @@ with c1:
             with st.spinner("Applying watermark…"):
                 st.session_state.converted = convert_many(uploaded)
             st.success(f"Converted {len(st.session_state.converted)} file(s).")
-with c2:
+with col2:
     if st.button("Download Watermarked Files (ZIP)", disabled=not uploaded):
         if not st.session_state.converted and uploaded:
             with st.spinner("Converting first…"):
