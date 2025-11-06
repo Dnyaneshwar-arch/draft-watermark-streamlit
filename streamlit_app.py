@@ -1,4 +1,4 @@
-# streamlit_app.py — DRAFT watermark centered on every page
+# streamlit_app.py — DRAFT watermark CENTERED on every page (single or multi-page)
 import io
 import os
 import zipfile
@@ -8,14 +8,14 @@ import streamlit as st
 from PIL import Image, ImageDraw, ImageFont
 import fitz  # PyMuPDF
 
-st.set_page_config(page_title="DRAFT Watermark (Centered)", layout="wide")
+st.set_page_config(page_title="DRAFT Watermark (Centered, All Pages)", layout="wide")
 
 # ===== Visual settings =====
 DRAFT_TEXT     = "DRAFT"
 DRAFT_COLOR    = (170, 170, 170)   # light grey
-DRAFT_ALPHA    = 115               # fade (0–255)
+DRAFT_ALPHA    = 95                # a bit lighter than before
 BASE_ANGLE_DEG = -45               # diagonal ↗ (clockwise in Pillow)
-FONT_DIAG_FRAC = 0.34              # size vs page diagonal (feel you liked)
+FONT_DIAG_FRAC = 0.34              # size vs page diagonal (same look)
 
 IMG_TYPES = {"jpg", "jpeg", "png", "webp", "tif", "tiff", "bmp"}
 
@@ -112,13 +112,14 @@ def watermark_image_bytes(src: bytes, ext: str) -> bytes:
 def watermark_pdf_bytes(src: bytes) -> bytes:
     """
     Center the word on every page AND keep diagonal consistent even if PDF pages
-    have a rotation flag. We add page.rotation to the draw angle so the viewer
-    always shows the same ↗ orientation while staying centered.
+    have a CropBox or a rotation flag. We use page.bound() (actual visible area),
+    and add page.rotation to the draw angle so the viewer always shows ↗.
     """
     doc = fitz.open(stream=src, filetype="pdf")
     for page in doc:
-        rect = page.rect
-        w, h = int(rect.width), int(rect.height)
+        # Use the rectangle the viewer actually displays (handles CropBox & rotation)
+        bound_rect = page.bound()  # <- this is the key change for multi-page PDFs
+        w, h = int(bound_rect.width), int(bound_rect.height)
 
         page_rot = (getattr(page, "rotation", 0) or 0) % 360
         angle_for_view = (BASE_ANGLE_DEG + page_rot) % 360
@@ -127,13 +128,15 @@ def watermark_pdf_bytes(src: bytes) -> bytes:
         rot = _scale_to_fit(rot, w, h)
         x, y = _center_position(w, h, rot)
 
+        # paint to a full-page transparent PNG overlay then place it to 'bound'
         overlay = Image.new("RGBA", (w, h), (255, 255, 255, 0))
         overlay.alpha_composite(rot, dest=(x, y))
         buf = io.BytesIO()
         overlay.save(buf, "PNG")
 
+        # Insert the overlay exactly over the visible area
         page.insert_image(
-            rect,
+            bound_rect,
             stream=buf.getvalue(),
             keep_proportion=False,
             overlay=True,
@@ -171,8 +174,8 @@ def make_zip(items: List[Tuple[str, bytes]]) -> bytes:
     return mem.getvalue()
 
 # ---------- UI ----------
-st.title("DRAFT watermark — centered")
-st.caption("Applies a light, diagonal DRAFT watermark centered on every page (images & PDFs).")
+st.title("DRAFT watermark — centered on every page")
+st.caption("Consistent center placement for single & multi-page PDFs (handles CropBox/Rotate) and images.")
 
 uploaded = st.file_uploader(
     "Upload PDFs / JPG / PNG / WEBP / TIFF (multiple allowed)",
@@ -183,8 +186,8 @@ uploaded = st.file_uploader(
 if "converted" not in st.session_state:
     st.session_state.converted = []
 
-col1, col2 = st.columns(2)
-with col1:
+c1, c2 = st.columns(2)
+with c1:
     if st.button("Convert as a Draft", type="primary", disabled=not uploaded):
         if not uploaded:
             st.error("Please upload files first.")
@@ -192,7 +195,7 @@ with col1:
             with st.spinner("Applying watermark…"):
                 st.session_state.converted = convert_many(uploaded)
             st.success(f"Converted {len(st.session_state.converted)} file(s).")
-with col2:
+with c2:
     if st.button("Download Watermarked Files (ZIP)", disabled=not uploaded):
         if not st.session_state.converted and uploaded:
             with st.spinner("Converting first…"):
