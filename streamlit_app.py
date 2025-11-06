@@ -11,12 +11,12 @@ import fitz  # PyMuPDF
 # ---------------- App Config ----------------
 st.set_page_config(page_title="DRAFT Watermark Tool", layout="wide")
 
-# Watermark look (simple, visible, never clipped)
+# Watermark: bigger + more faded, but never clipped
 DRAFT_TEXT   = "DRAFT"
 DRAFT_COLOR  = (170, 170, 170)   # neutral gray
-DRAFT_ALPHA  = 150               # lighter (~60% opaque)  ← was 180
+DRAFT_ALPHA  = 120               # more fade (~47% opaque)
 DRAFT_ROTATE = 45                # diagonal
-MARGIN_FRAC  = 0.07              # 7% page/photo margin  ← was 0.10
+MARGIN_FRAC  = 0.05              # 5% page/photo margin (bigger watermark)
 
 IMG_TYPES = {"jpg", "jpeg", "png", "webp", "tif", "tiff", "bmp"}
 MAX_FILES = 50
@@ -24,9 +24,9 @@ MAX_FILES = 50
 # ---------------- Helpers ----------------
 def _load_font(px: int) -> ImageFont.FreeTypeFont:
     for path in [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",  # Linux
-        "/Library/Fonts/Arial Bold.ttf",                         # macOS
-        "C:\\Windows\\Fonts\\arialbd.ttf",                       # Windows
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/Library/Fonts/Arial Bold.ttf",
+        "C:\\Windows\\Fonts\\arialbd.ttf",
         "DejaVuSans-Bold.ttf",
     ]:
         if os.path.exists(path):
@@ -37,7 +37,6 @@ def _load_font(px: int) -> ImageFont.FreeTypeFont:
     return ImageFont.load_default()
 
 def _text_size(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont) -> Tuple[int, int]:
-    """Pillow-10 safe text measuring."""
     try:
         bbox = draw.textbbox((0, 0), text, font=font)
         return (bbox[2] - bbox[0], bbox[3] - bbox[1])
@@ -49,19 +48,19 @@ def _text_size(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFon
 
 def _make_rotated_word_fit(w: int, h: int) -> Image.Image:
     """
-    Build an RGBA image (w x h) with DRAFT rotated and auto-scaled to fit
-    fully within the canvas with margins. Includes small post-fit shrink
-    to guarantee no edge clipping.
+    Build an RGBA image (w x h) with DRAFT rotated and auto-scaled
+    to fit fully inside the canvas with margins. Includes tiny post-fit
+    shrink and generous padding so edges never clip.
     """
     canvas = Image.new("RGBA", (w, h), (255, 255, 255, 0))
 
-    # Start big (based on diagonal) — we’ll scale down to fit.
+    # Start large (based on diagonal); final size capped by fit.
     diag = (w**2 + h**2) ** 0.5
-    font_size = max(24, int(diag * 0.22))  # generous start; final size capped by fit
+    font_size = max(24, int(diag * 0.24))  # a touch larger than before
     font = _load_font(font_size)
 
-    # Draw the word on a padded tile (padding prevents rotated edge cuts)
-    pad = 60
+    # Draw word on a padded tile (padding protects rotated corners)
+    pad = 80
     tmp = Image.new("RGBA", (10, 10), (255, 255, 255, 0))
     dtmp = ImageDraw.Draw(tmp)
     tw, th = _text_size(dtmp, DRAFT_TEXT, font)
@@ -73,24 +72,22 @@ def _make_rotated_word_fit(w: int, h: int) -> Image.Image:
         fill=(DRAFT_COLOR[0], DRAFT_COLOR[1], DRAFT_COLOR[2], DRAFT_ALPHA),
     )
 
-    # Rotate then fit to page with margin
+    # Rotate then fit to page with margins
     rotated = tight.rotate(DRAFT_ROTATE, expand=True)
     rx, ry = rotated.size
 
-    # Available size after margins
     margin_w = int(w * MARGIN_FRAC)
     margin_h = int(h * MARGIN_FRAC)
     max_w = max(1, w - 2 * margin_w)
     max_h = max(1, h - 2 * margin_h)
 
-    # Scale to fit; very small shrink to ensure safety (make it as big as possible)
-    scale = min(max_w / rx, max_h / ry, 1.0) * 0.992   # ← was 0.98
+    # Fit scale + tiny safety shrink so nothing touches edges
+    scale = min(max_w / rx, max_h / ry, 1.0) * 0.988
     if scale < 1.0:
         new_size = (max(1, int(rx * scale)), max(1, int(ry * scale)))
         rotated = rotated.resize(new_size, resample=Image.LANCZOS)
         rx, ry = rotated.size
 
-    # Center
     pos = ((w - rx) // 2, (h - ry) // 2)
     canvas.alpha_composite(rotated, dest=pos)
     return canvas
@@ -160,7 +157,7 @@ def make_zip(name_bytes_list: List[Tuple[str, bytes]]) -> bytes:
 
 # ---------------- UI ----------------
 st.title("TEST CERTIFICATE → DRAFT Watermark (Streamlit)")
-st.caption("Watermark auto-fits with margins and prints on every PDF page. Slightly lighter and larger now.")
+st.caption("More faded and larger. Auto-fits with margins and prints on every PDF page.")
 
 uploaded = st.file_uploader(
     "Choose files (multiple allowed)",
