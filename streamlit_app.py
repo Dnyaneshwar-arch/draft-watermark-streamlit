@@ -9,9 +9,9 @@ st.set_page_config(page_title="DRAFT Watermark Tool", layout="wide")
 
 DRAFT_TEXT   = "DRAFT"
 DRAFT_COLOR  = (170, 170, 170)
-DRAFT_ALPHA  = 120                 # keep the same fade you liked
+DRAFT_ALPHA  = 120                # keep the fade you liked
 DRAFT_ROTATE = 45
-MARGIN_FRAC  = 0.04                # ↓ margin => bigger watermark (was 0.05)
+MARGIN_FRAC  = 0.03               # ↓ 3% margin => larger watermark
 
 IMG_TYPES = {"jpg","jpeg","png","webp","tif","tiff","bmp"}
 MAX_FILES = 50
@@ -28,8 +28,7 @@ def _load_font(px:int)->ImageFont.FreeTypeFont:
 
 def _text_size(d:ImageDraw.ImageDraw, t:str, f:ImageFont.FreeTypeFont)->Tuple[int,int]:
     try:
-        x0,y0,x1,y1 = d.textbbox((0,0), t, font=f)
-        return (x1-x0, y1-y0)
+        x0,y0,x1,y1 = d.textbbox((0,0), t, font=f); return (x1-x0, y1-y0)
     except:
         try: return d.textsize(t, font=f)  # type: ignore[attr-defined]
         except: return Image.new("L",(1,1))._new(f.getmask(t)).size
@@ -37,22 +36,23 @@ def _text_size(d:ImageDraw.ImageDraw, t:str, f:ImageFont.FreeTypeFont)->Tuple[in
 def _make_rotated_word_fit(w:int, h:int)->Image.Image:
     canvas = Image.new("RGBA",(w,h),(255,255,255,0))
     diag = (w**2 + h**2) ** 0.5
-    font_size = max(24, int(diag * 0.26))    # ↑ start larger (was 0.24)
+    font_size = max(24, int(diag * 0.28))      # ↑ bigger start size
     font = _load_font(font_size)
 
-    pad = 80
+    pad = 90                                     # ↑ more padding for safety
     tmp = Image.new("RGBA",(10,10),(255,255,255,0))
     tw,th = _text_size(ImageDraw.Draw(tmp), DRAFT_TEXT, font)
     tile = Image.new("RGBA",(tw+2*pad, th+2*pad),(255,255,255,0))
     ImageDraw.Draw(tile).text((pad,pad), DRAFT_TEXT, font=font,
-                              fill=(DRAFT_COLOR[0],DRAFT_COLOR[1],DRAFT_COLOR[2],DRAFT_ALPHA))
+                              fill=(DRAFT_COLOR[0],DRAFT_COLOR[1],DRAFT_COLOR[2], DRAFT_ALPHA))
+
     rotated = tile.rotate(DRAFT_ROTATE, expand=True)
     rx,ry = rotated.size
 
     mw, mh = int(w*MARGIN_FRAC), int(h*MARGIN_FRAC)
     max_w, max_h = max(1,w-2*mw), max(1,h-2*mh)
 
-    scale = min(max_w/rx, max_h/ry, 1.0) * 0.986   # ↓ tiny shrink (was 0.988)
+    scale = min(max_w/rx, max_h/ry, 1.0) * 0.984  # ↓ slightly larger but still safe
     if scale < 1.0:
         rotated = rotated.resize((max(1,int(rx*scale)), max(1,int(ry*scale))), Image.LANCZOS)
         rx,ry = rotated.size
@@ -67,7 +67,7 @@ def watermark_image_bytes(src:bytes, ext:str)->bytes:
         overlay = _make_rotated_word_fit(w,h)
         out = Image.alpha_composite(base, overlay)
         buf = io.BytesIO()
-        if ext in ("jpg","jpeg"): out.convert("RGB").save(buf, "JPEG", quality=95, subsampling=1)
+        if ext in ("jpg","jpeg"): out.convert("RGB").save(buf,"JPEG",quality=95,subsampling=1)
         elif ext=="png": out.save(buf,"PNG")
         elif ext=="webp": out.convert("RGB").save(buf,"WEBP",quality=95)
         elif ext in ("tif","tiff"): out.convert("RGB").save(buf,"TIFF")
@@ -106,7 +106,7 @@ def make_zip(items:List[Tuple[str,bytes]])->bytes:
     mem.seek(0); return mem.getvalue()
 
 st.title("TEST CERTIFICATE → DRAFT Watermark (Streamlit)")
-st.caption("Bigger watermark (still safe), faded, and on every PDF page.")
+st.caption("Largest yet (safe), faded, and applied to every PDF page.")
 
 uploaded = st.file_uploader("Choose files (multiple allowed)",
                             type=list(IMG_TYPES|{"pdf"}), accept_multiple_files=True)
