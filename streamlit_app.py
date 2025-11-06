@@ -11,12 +11,12 @@ import fitz  # PyMuPDF
 # ---------------- App Config ----------------
 st.set_page_config(page_title="DRAFT Watermark Tool", layout="wide")
 
-# Watermark look (simple & visible on any background)
+# Watermark look (simple, visible, never clipped)
 DRAFT_TEXT   = "DRAFT"
 DRAFT_COLOR  = (170, 170, 170)   # neutral gray
-DRAFT_ALPHA  = 230               # 0..255 (230 ≈ 90% opaque)
+DRAFT_ALPHA  = 180               # 0..255 (≈70% opaque → more fade)
 DRAFT_ROTATE = 45                # diagonal
-MARGIN_FRAC  = 0.05              # 5% page/photo margin
+MARGIN_FRAC  = 0.10              # 10% page/photo margin for safety
 
 IMG_TYPES = {"jpg", "jpeg", "png", "webp", "tif", "tiff", "bmp"}
 MAX_FILES = 50
@@ -49,45 +49,49 @@ def _text_size(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFon
 
 def _make_rotated_word_fit(w: int, h: int) -> Image.Image:
     """
-    Build an RGBA image of size (w,h) with the word DRAFT rotated DRAFT_ROTATE and
-    auto-scaled to fit fully inside the canvas with margins. No background plate.
+    Build an RGBA image (w x h) with DRAFT rotated and auto-scaled to fit
+    fully within the canvas with margins. Includes small post-fit shrink
+    to guarantee no edge clipping.
     """
     canvas = Image.new("RGBA", (w, h), (255, 255, 255, 0))
 
-    # Start with a large font based on diagonal; we will scale down if needed.
+    # Start big (based on diagonal) — we’ll scale down to fit.
     diag = (w**2 + h**2) ** 0.5
-    font_size = max(24, int(diag * 0.20))  # start a bit big
+    font_size = max(24, int(diag * 0.22))  # start a bit larger than needed
     font = _load_font(font_size)
 
-    # Render the word onto a tight temporary image
+    # Draw the word on a padded tile (extra padding prevents rotated edge cuts)
+    # padding: 60px all around
     tmp = Image.new("RGBA", (10, 10), (255, 255, 255, 0))
     dtmp = ImageDraw.Draw(tmp)
     tw, th = _text_size(dtmp, DRAFT_TEXT, font)
-    tight = Image.new("RGBA", (tw + 20, th + 20), (255, 255, 255, 0))
+    pad = 60
+    tight = Image.new("RGBA", (tw + 2 * pad, th + 2 * pad), (255, 255, 255, 0))
     ImageDraw.Draw(tight).text(
-        (10, 10),
+        (pad, pad),
         DRAFT_TEXT,
         font=font,
-        fill=(DRAFT_COLOR[0], DRAFT_COLOR[1], DRAFT_COLOR[2], DRAFT_ALPHA),  # opaque-ish text
+        fill=(DRAFT_COLOR[0], DRAFT_COLOR[1], DRAFT_COLOR[2], DRAFT_ALPHA),
     )
 
-    # Rotate and then scale to fit inside (w,h) with margins
+    # Rotate then fit to page with margin
     rotated = tight.rotate(DRAFT_ROTATE, expand=True)
     rx, ry = rotated.size
 
-    # Fit inside available box with margins
+    # Available size after margins
     margin_w = int(w * MARGIN_FRAC)
     margin_h = int(h * MARGIN_FRAC)
     max_w = max(1, w - 2 * margin_w)
     max_h = max(1, h - 2 * margin_h)
 
-    scale = min(max_w / rx, max_h / ry, 1.0)  # never scale up
+    # Scale to fit; apply a tiny 2% shrink to ensure safety
+    scale = min(max_w / rx, max_h / ry, 1.0) * 0.98
     if scale < 1.0:
         new_size = (max(1, int(rx * scale)), max(1, int(ry * scale)))
         rotated = rotated.resize(new_size, resample=Image.LANCZOS)
         rx, ry = rotated.size
 
-    # Center it
+    # Center
     pos = ((w - rx) // 2, (h - ry) // 2)
     canvas.alpha_composite(rotated, dest=pos)
     return canvas
@@ -119,7 +123,7 @@ def watermark_pdf_bytes(src_bytes: bytes) -> bytes:
         rect = page.rect
         w, h = int(rect.width), int(rect.height)
         png_overlay = io.BytesIO()
-        _make_rotated_word_fit(w, h).save(png_overlay, format="PNG")  # transparent PNG
+        _make_rotated_word_fit(w, h).save(png_overlay, format="PNG")
         png_overlay.seek(0)
         page.insert_image(rect, stream=png_overlay.getvalue(), keep_proportion=False, overlay=True)
     out_buf = io.BytesIO()
@@ -157,7 +161,7 @@ def make_zip(name_bytes_list: List[Tuple[str, bytes]]) -> bytes:
 
 # ---------------- UI ----------------
 st.title("TEST CERTIFICATE → DRAFT Watermark (Streamlit)")
-st.caption("Upload PDFs / JPG / PNG / WEBP / TIFF. Click **Convert as a Draft** and **Download Watermarked Files**. Watermark fits the page and appears on every PDF page.")
+st.caption("Watermark auto-fits with margins and prints on every PDF page. Fade adjusted so table text stays readable.")
 
 uploaded = st.file_uploader(
     "Choose files (multiple allowed)",
@@ -182,10 +186,10 @@ with c1:
 
 with c2:
     if st.button("Download Watermarked Files (ZIP)", disabled=not uploaded):
-        if not st.session_state.converted and uploaded:
-            with st.spinner("Converting first..."):
-                st.session_state.converted = convert_many(uploaded)
-        if st.session_state.converted:
+        if st.session_state.converted or uploaded:
+            if not st.session_state.converted:
+                with st.spinner("Converting first..."):
+                    st.session_state.converted = convert_many(uploaded)
             zip_bytes = make_zip(st.session_state.converted)
             st.download_button(
                 label="Click to Save ZIP",
