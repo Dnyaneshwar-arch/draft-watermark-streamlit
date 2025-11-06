@@ -10,19 +10,19 @@ import fitz  # PyMuPDF
 
 st.set_page_config(page_title="DRAFT Watermark Tool", layout="wide")
 
-# ===== Desired look (matches your “good” PDF) =====
+# ===== Desired look (matches your target PDF) =====
 DRAFT_TEXT    = "DRAFT"
 DRAFT_COLOR   = (170, 170, 170)   # neutral grey
 DRAFT_ALPHA   = 115               # light fade
-DESIRED_ANGLE = 45                # visible diagonal ↗
+DESIRED_ANGLE = -45               # clockwise diagonal (D bottom-left, T top-right)
 MARGIN_FRAC   = 0.015             # larger word, safe margins
-VERTICAL_OFFSET_FRAC = 0.0        # true center on every page
+VERTICAL_OFFSET_FRAC = 0.0        # perfect center
 
 IMG_TYPES = {"jpg", "jpeg", "png", "webp", "tif", "tiff", "bmp"}
 
 # ---------- Font loader (forces identical rendering) ----------
 def _load_font(px: int) -> ImageFont.FreeTypeFont:
-    # Prefer the bundled font in the repo (upload DejaVuSans-Bold.ttf next to this file)
+    # Prefer bundled font in repo
     here = os.path.dirname(__file__)
     font_here = os.path.join(here, "DejaVuSans-Bold.ttf")
     if os.path.exists(font_here):
@@ -31,7 +31,7 @@ def _load_font(px: int) -> ImageFont.FreeTypeFont:
         except Exception:
             pass
 
-    # Fallbacks if the bundled file is missing
+    # Fallbacks if bundled file missing
     for p in [
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
         "/Library/Fonts/Arial Bold.ttf",
@@ -55,16 +55,16 @@ def _text_size(d: ImageDraw.ImageDraw, t: str, f: ImageFont.FreeTypeFont) -> Tup
         except Exception:
             return Image.new("L", (1, 1))._new(f.getmask(t)).size
 
-# ---------- Build a centered, rotated RGBA watermark the size of the page ----------
+# ---------- Build a centered, rotated RGBA watermark ----------
 def _watermark_rgba(page_w: int, page_h: int, angle_deg: int) -> Image.Image:
     canvas = Image.new("RGBA", (page_w, page_h), (255, 255, 255, 0))
     diag = (page_w**2 + page_h**2) ** 0.5
 
-    # Start very large; scale-to-fit will cap it safely
+    # Start large; scale-to-fit will cap it safely
     font_size = max(24, int(diag * 0.34))
     font = _load_font(font_size)
 
-    # Draw text on a padded tile so corners never clip after rotation
+    # Draw text on padded tile so corners don't clip
     pad = 120
     tmp = Image.new("RGBA", (10, 10), (255, 255, 255, 0))
     tw, th = _text_size(ImageDraw.Draw(tmp), DRAFT_TEXT, font)
@@ -79,10 +79,10 @@ def _watermark_rgba(page_w: int, page_h: int, angle_deg: int) -> Image.Image:
     rotated = tile.rotate(angle_deg % 360, expand=True)
     rx, ry = rotated.size
 
-    # Fit within margins on this page
+    # Fit within margins
     mw, mh = int(page_w * MARGIN_FRAC), int(page_h * MARGIN_FRAC)
     max_w, max_h = max(1, page_w - 2 * mw), max(1, page_h - 2 * mh)
-    scale = min(max_w / rx, max_h / ry, 1.0) * 0.978  # tiny safety shrink
+    scale = min(max_w / rx, max_h / ry, 1.0) * 0.978
     if scale < 1.0:
         rotated = rotated.resize(
             (max(1, int(rx * scale)), max(1, int(ry * scale))),
@@ -90,7 +90,7 @@ def _watermark_rgba(page_w: int, page_h: int, angle_deg: int) -> Image.Image:
         )
         rx, ry = rotated.size
 
-    # Exact center + optional small vertical nudge
+    # Exact center + optional nudge
     cx = (page_w - rx) // 2
     cy = (page_h - ry) // 2 + int(page_h * VERTICAL_OFFSET_FRAC)
     canvas.alpha_composite(rotated, dest=(cx, cy))
@@ -100,7 +100,7 @@ def _watermark_rgba(page_w: int, page_h: int, angle_deg: int) -> Image.Image:
 def watermark_image_bytes(src: bytes, ext: str) -> bytes:
     with Image.open(io.BytesIO(src)).convert("RGBA") as base:
         w, h = base.size
-        overlay = _watermark_rgba(w, h, DESIRED_ANGLE)  # images have no page-rotation
+        overlay = _watermark_rgba(w, h, DESIRED_ANGLE)
         out = Image.alpha_composite(base, overlay)
 
         buf = io.BytesIO()
@@ -119,15 +119,15 @@ def watermark_image_bytes(src: bytes, ext: str) -> bytes:
 def watermark_pdf_bytes(src: bytes) -> bytes:
     """
     For every page:
-      - read its stored rotation (0/90/180/270)
-      - compensate so the visible diagonal is always DESIRED_ANGLE
-      - center perfectly on that page
+      - read stored rotation (0/90/180/270)
+      - compensate so visible diagonal stays clockwise (-45°)
+      - center perfectly
     """
     doc = fitz.open(stream=src, filetype="pdf")
     for p in doc:
         w, h = int(p.rect.width), int(p.rect.height)
         page_rot = (getattr(p, "rotation", 0) or 0) % 360
-        effective_angle = (DESIRED_ANGLE - page_rot) % 360  # keep the visible diagonal consistent
+        effective_angle = (DESIRED_ANGLE - page_rot) % 360
 
         b = io.BytesIO()
         _watermark_rgba(w, h, effective_angle).save(b, "PNG")
@@ -170,8 +170,8 @@ def make_zip(items: List[Tuple[str, bytes]]) -> bytes:
     return mem.getvalue()
 
 # ---------- UI ----------
-st.title("TEST CERTIFICATE → DRAFT Watermark (Streamlit)")
-st.caption("Cloned style: same font, fade, diagonal, and perfect centering on every page (rotation-compensated).")
+st.title("TEST CERTIFICATE → DRAFT Watermark (Clockwise Rotation)")
+st.caption("Now rotated clockwise: D bottom-left, T top-right. Centered, consistent fade and size across all pages.")
 
 uploaded = st.file_uploader(
     "Choose files (multiple allowed)",
