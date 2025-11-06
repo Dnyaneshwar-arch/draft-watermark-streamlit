@@ -34,6 +34,21 @@ def _load_font(px: int) -> ImageFont.FreeTypeFont:
                 pass
     return ImageFont.load_default()
 
+def _text_size(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont) -> Tuple[int, int]:
+    """
+    Pillow 10+ removed textsize(); use textbbox() and fall back when needed.
+    """
+    try:
+        bbox = draw.textbbox((0, 0), text, font=font)
+        return (bbox[2] - bbox[0], bbox[3] - bbox[1])
+    except Exception:
+        try:
+            # Older Pillow:
+            return draw.textsize(text, font=font)  # type: ignore[attr-defined]
+        except Exception:
+            # Last-resort fallback
+            return Image.new("L", (1, 1))._new(font.getmask(text)).size
+
 # ---------- Image watermark ----------
 def watermark_image_bytes(src_bytes: bytes, ext_lower: str) -> bytes:
     """Return watermarked image bytes (keep format)."""
@@ -47,7 +62,7 @@ def watermark_image_bytes(src_bytes: bytes, ext_lower: str) -> bytes:
 
         # draw text on a separate image, rotate, center-composite
         d = ImageDraw.Draw(overlay)
-        tw, th = d.textsize(DRAFT_TEXT, font=font)
+        tw, th = _text_size(d, DRAFT_TEXT, font)
 
         temp = Image.new("RGBA", (tw + 10, th + 10), (255, 255, 255, 0))
         ImageDraw.Draw(temp).text(
@@ -86,9 +101,10 @@ def _make_rotated_text_png(width: int, height: int) -> bytes:
     font_size = max(24, int(diag * 0.14))
     font = _load_font(font_size)
 
-    # draw text onto a small image, rotate, then paste to center
-    draw = ImageDraw.Draw(canvas)
-    tw, th = draw.textsize(DRAFT_TEXT, font=font)
+    # measure text using Pillow-10-safe approach
+    d = ImageDraw.Draw(canvas)
+    tw, th = _text_size(d, DRAFT_TEXT, font)
+
     tmp = Image.new("RGBA", (tw + 10, th + 10), (255, 255, 255, 0))
     ImageDraw.Draw(tmp).text(
         (5, 5),
