@@ -8,20 +8,25 @@ import streamlit as st
 from PIL import Image, ImageDraw, ImageFont
 import fitz  # PyMuPDF
 
+# ---------------- App Config ----------------
 st.set_page_config(page_title="DRAFT Watermark Tool", layout="wide")
 
+# Watermark spec (constant color regardless of background)
 DRAFT_TEXT = "DRAFT"
-DRAFT_OPACITY = 0.25               # darker: was 0.15
-DRAFT_RGB = (170, 170, 170)        # darker: was (190,190,190)
-DRAFT_ROTATION = 45
+DRAFT_RGB = (170, 170, 170)        # fixed gray (visible but not black)
+DRAFT_ROTATION = 45                # diagonal
 IMG_TYPES = {"jpg", "jpeg", "png", "webp", "tif", "tiff", "bmp"}
 MAX_FILES = 50
 
+# Behind-text soft plate so text reads on busy/dark areas (tweak if needed)
+PLATE_RGBA = (255, 255, 255, 38)   # ~15% white plate (0..255)
+TEXT_ALPHA = 255                   # OPAQUE text so color never changes
+
 def _load_font(px: int) -> ImageFont.FreeTypeFont:
     for path in [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-        "/Library/Fonts/Arial Bold.ttf",
-        "C:\\Windows\\Fonts\\arialbd.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",  # Linux
+        "/Library/Fonts/Arial Bold.ttf",                         # macOS
+        "C:\\Windows\\Fonts\\arialbd.ttf",                       # Windows
         "DejaVuSans-Bold.ttf",
     ]:
         if os.path.exists(path):
@@ -41,6 +46,7 @@ def _text_size(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFon
         except Exception:
             return Image.new("L", (1, 1))._new(font.getmask(text)).size
 
+# ---------- Image watermark (opaque text + soft plate) ----------
 def watermark_image_bytes(src_bytes: bytes, ext_lower: str) -> bytes:
     with Image.open(io.BytesIO(src_bytes)).convert("RGBA") as base:
         w, h = base.size
@@ -52,17 +58,24 @@ def watermark_image_bytes(src_bytes: bytes, ext_lower: str) -> bytes:
         d = ImageDraw.Draw(overlay)
         tw, th = _text_size(d, DRAFT_TEXT, font)
 
+        # Draw text to temp, then rotate
         temp = Image.new("RGBA", (tw + 10, th + 10), (255, 255, 255, 0))
-        ImageDraw.Draw(temp).text(
-            (5, 5),
-            DRAFT_TEXT,
-            font=font,
-            fill=DRAFT_RGB + (int(255 * DRAFT_OPACITY),),
-        )
-        rotated = temp.rotate(DRAFT_ROTATION, expand=True)
-        rx, ry = rotated.size
+        td = ImageDraw.Draw(temp)
+        # soft plate under text area (same size as temp)
+        plate = Image.new("RGBA", temp.size, (0, 0, 0, 0))
+        ImageDraw.Draw(plate).rectangle([0, 0, temp.size[0], temp.size[1]], fill=PLATE_RGBA)
+        # draw opaque text (fixed color, alpha 255)
+        td.text((5, 5), DRAFT_TEXT, font=font, fill=(DRAFT_RGB[0], DRAFT_RGB[1], DRAFT_RGB[2], TEXT_ALPHA))
+
+        rotated_plate = plate.rotate(DRAFT_ROTATION, expand=True)
+        rotated_text = temp.rotate(DRAFT_ROTATION, expand=True)
+
+        # center composite
+        rx, ry = rotated_text.size
         pos = ((w - rx) // 2, (h - ry) // 2)
-        overlay.alpha_composite(rotated, dest=pos)
+        # plate first, then text
+        overlay.alpha_composite(rotated_plate, dest=pos)
+        overlay.alpha_composite(rotated_text, dest=pos)
 
         out_img = Image.alpha_composite(base, overlay)
         buf = io.BytesIO()
@@ -78,6 +91,7 @@ def watermark_image_bytes(src_bytes: bytes, ext_lower: str) -> bytes:
             out_img.convert("RGB").save(buf, format="PNG")
         return buf.getvalue()
 
+# ---------- PDF watermark (opaque text PNG overlay + soft plate) ----------
 def _make_rotated_text_png(width: int, height: int) -> bytes:
     canvas = Image.new("RGBA", (width, height), (255, 255, 255, 0))
     diag = (width**2 + height**2) ** 0.5
@@ -87,20 +101,21 @@ def _make_rotated_text_png(width: int, height: int) -> bytes:
     d = ImageDraw.Draw(canvas)
     tw, th = _text_size(d, DRAFT_TEXT, font)
 
+    # build temp with plate + opaque text
     tmp = Image.new("RGBA", (tw + 10, th + 10), (255, 255, 255, 0))
-    ImageDraw.Draw(tmp).text(
-        (5, 5),
-        DRAFT_TEXT,
-        font=font,
-        fill=DRAFT_RGB + (int(255 * DRAFT_OPACITY),),
-    )
+    tdraw = ImageDraw.Draw(tmp)
+    # plate under text
+    ImageDraw.Draw(tmp).rectangle([0, 0, tmp.size[0], tmp.size[1]], fill=PLATE_RGBA)
+    # opaque text (fixed color)
+    tdraw.text((5, 5), DRAFT_TEXT, font=font, fill=(DRAFT_RGB[0], DRAFT_RGB[1], DRAFT_RGB[2], TEXT_ALPHA))
+
     rotated = tmp.rotate(DRAFT_ROTATION, expand=True)
     rx, ry = rotated.size
     pos = ((width - rx) // 2, (height - ry) // 2)
     canvas.alpha_composite(rotated, dest=pos)
 
     out = io.BytesIO()
-    canvas.save(out, format="PNG")
+    canvas.save(out, format="PNG")  # transparent PNG overlay
     out.seek(0)
     return out.getvalue()
 
@@ -110,12 +125,14 @@ def watermark_pdf_bytes(src_bytes: bytes) -> bytes:
         rect = page.rect
         w, h = int(rect.width), int(rect.height)
         png_overlay = _make_rotated_text_png(w, h)
+        # full-page overlay; text itself is opaque so color never changes
         page.insert_image(rect, stream=png_overlay, keep_proportion=False, overlay=True)
     out_buf = io.BytesIO()
     doc.save(out_buf)
     doc.close()
     return out_buf.getvalue()
 
+# ---------- Batch conversion & ZIP ----------
 def convert_many(uploaded_files) -> List[Tuple[str, bytes]]:
     results = []
     for uf in uploaded_files:
@@ -143,6 +160,7 @@ def make_zip(name_bytes_list: List[Tuple[str, bytes]]) -> bytes:
     mem.seek(0)
     return mem.getvalue()
 
+# ---------------- UI ----------------
 st.title("TEST CERTIFICATE → DRAFT Watermark (Streamlit)")
 st.caption("Upload PDFs / JPG / PNG / WEBP / TIFF. Then click **Convert as a Draft** and **Download Watermarked Files**.")
 
@@ -185,7 +203,6 @@ with col2:
             st.error("Nothing to download. Please upload supported files.")
 
 st.write("---")
-
 left, right = st.columns(2)
 with left:
     st.subheader("Uploaded files")
@@ -194,7 +211,6 @@ with left:
             st.write("• ", uf.name)
     else:
         st.info("No files uploaded yet.")
-
 with right:
     st.subheader("Watermarked (ready)")
     if st.session_state.converted:
@@ -203,4 +219,4 @@ with right:
     else:
         st.info("Nothing converted yet.")
 
-st.caption("The watermark is big, light-gray, diagonal (45°), ~25% opacity on every page (PDF) and every image.")
+st.caption("Watermark uses a fixed gray color with a soft plate behind it, so it looks the same on any background.")
