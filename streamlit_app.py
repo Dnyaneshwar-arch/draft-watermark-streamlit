@@ -34,6 +34,7 @@ def _load_font(px: int) -> ImageFont.FreeTypeFont:
                 pass
     return ImageFont.load_default()
 
+# ---------- Image watermark ----------
 def watermark_image_bytes(src_bytes: bytes, ext_lower: str) -> bytes:
     """Return watermarked image bytes (keep format)."""
     with Image.open(io.BytesIO(src_bytes)).convert("RGBA") as base:
@@ -45,8 +46,7 @@ def watermark_image_bytes(src_bytes: bytes, ext_lower: str) -> bytes:
         overlay = Image.new("RGBA", base.size, (255, 255, 255, 0))
 
         # draw text on a separate image, rotate, center-composite
-        text_layer = Image.new("RGBA", base.size, (255, 255, 255, 0))
-        d = ImageDraw.Draw(text_layer)
+        d = ImageDraw.Draw(overlay)
         tw, th = d.textsize(DRAFT_TEXT, font=font)
 
         temp = Image.new("RGBA", (tw + 10, th + 10), (255, 255, 255, 0))
@@ -75,33 +75,52 @@ def watermark_image_bytes(src_bytes: bytes, ext_lower: str) -> bytes:
             out_img.convert("RGB").save(buf, format="PNG")
         return buf.getvalue()
 
+# ---------- PDF watermark (45° via transparent PNG overlay) ----------
+def _make_rotated_text_png(width: int, height: int) -> bytes:
+    """
+    Build a transparent RGBA PNG the size of the PDF page with a centered, rotated
+    DRAFT text at 45° and ~15% opacity.
+    """
+    canvas = Image.new("RGBA", (width, height), (255, 255, 255, 0))
+    diag = (width**2 + height**2) ** 0.5
+    font_size = max(24, int(diag * 0.14))
+    font = _load_font(font_size)
+
+    # draw text onto a small image, rotate, then paste to center
+    draw = ImageDraw.Draw(canvas)
+    tw, th = draw.textsize(DRAFT_TEXT, font=font)
+    tmp = Image.new("RGBA", (tw + 10, th + 10), (255, 255, 255, 0))
+    ImageDraw.Draw(tmp).text(
+        (5, 5),
+        DRAFT_TEXT,
+        font=font,
+        fill=DRAFT_RGB + (int(255 * DRAFT_OPACITY),),
+    )
+    rotated = tmp.rotate(DRAFT_ROTATION, expand=True)
+    rx, ry = rotated.size
+    pos = ((width - rx) // 2, (height - ry) // 2)
+    canvas.alpha_composite(rotated, dest=pos)
+
+    out = io.BytesIO()
+    canvas.save(out, format="PNG")  # preserves alpha
+    out.seek(0)
+    return out.getvalue()
+
 def watermark_pdf_bytes(src_bytes: bytes) -> bytes:
-    """Return watermarked PDF bytes (all pages)."""
+    """Return watermarked PDF bytes (all pages) by overlaying a transparent PNG."""
     doc = fitz.open(stream=src_bytes, filetype="pdf")
     for page in doc:
         rect = page.rect
-        diag = (rect.width**2 + rect.height**2) ** 0.5
-        font_size = max(24, int(diag * 0.14))
-
-        # NOTE: Use fill_opacity / stroke_opacity (PyMuPDF >= 1.22)
-        page.insert_textbox(
-            rect,
-            DRAFT_TEXT,
-            fontname="helv",  # built-in Helvetica
-            fontsize=font_size,
-            color=(DRAFT_RGB[0] / 255, DRAFT_RGB[1] / 255, DRAFT_RGB[2] / 255),
-            rotate=DRAFT_ROTATION,
-            align=1,              # centered
-            render_mode=0,        # fill
-            overlay=True,
-            fill_opacity=DRAFT_OPACITY,
-            stroke_opacity=DRAFT_OPACITY,
-        )
+        w, h = int(rect.width), int(rect.height)
+        png_overlay = _make_rotated_text_png(w, h)
+        # Insert the transparent PNG across the full page
+        page.insert_image(rect, stream=png_overlay, keep_proportion=False, overlay=True)
     out_buf = io.BytesIO()
     doc.save(out_buf)
     doc.close()
     return out_buf.getvalue()
 
+# ---------- Batch conversion & ZIP ----------
 def convert_many(uploaded_files) -> List[Tuple[str, bytes]]:
     """Convert all UploadedFile(s) -> list of (new_name, bytes)."""
     results = []
