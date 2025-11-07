@@ -1,27 +1,29 @@
 # streamlit_app.py
-# NOTE: On Streamlit Cloud, also add runtime.txt with: 3.12
-# and requirements.txt with: streamlit, Pillow, PyMuPDF
 
 import io
 from zipfile import ZipFile, ZIP_DEFLATED
 
 import streamlit as st
-import fitz  # PyMuPDF
+from pypdf import PdfReader, PdfWriter
+from reportlab.pdfgen import canvas
 
 # ============================
 # Watermark settings
 # ============================
 WM_TEXT = "DRAFT"
-WM_OPACITY = 0.12          # a bit faded; adjust 0.08–0.18 if needed
-WM_COLOR = (0.7, 0.7, 0.7) # light gray (RGB 0–1 in PyMuPDF)
+WM_OPACITY = 0.12          # simulated via very light gray
+WM_COLOR = (0.7, 0.7, 0.7) # light gray (RGB 0–1)
 WM_ROTATE = 45             # bottom-left to top-right
-WM_FONT = "helv"           # built-in Helvetica
-WM_SCALE = 0.18            # proportional to page diagonal (0.16–0.22 works well)
+WM_FONT = "Helvetica"      # built-in ReportLab font
+WM_SCALE = 0.18            # proportional to page diagonal (similar look)
 
 st.set_page_config(page_title="PDF → DRAFT Watermark", layout="centered")
 
 st.title("TEST CERTIFICATE → DRAFT Watermark (PDF)")
-st.caption("Uploads: PDFs only • Up to **50** at a time • Watermark is diagonal, centered, light gray, and faded.")
+st.caption(
+    "Uploads: PDFs only • Up to **50** at a time • "
+    "Watermark is diagonal, centered, light gray, and faded."
+)
 
 # ======================================================
 # Upload (PDF only) + visible red message under uploader
@@ -36,7 +38,7 @@ uploaded = st.file_uploader(
 
 too_many = False
 if uploaded and len(uploaded) > 50:
-    # This will appear in red, directly under the uploader
+    # This appears in red directly under the uploader
     st.error("Max 50 PDFs can be uploaded at once")
     too_many = True
 
@@ -52,44 +54,74 @@ if "pending_pdfs" not in st.session_state:
     st.session_state.pending_pdfs = []
 st.session_state.pending_pdfs = valid_files
 
+
+# ==================================
+# Helper: create a single watermark page
+# ==================================
+def _create_watermark_page(width: float, height: float):
+    """
+    Build a single-page PDF (in memory) with a diagonal 'DRAFT'
+    watermark matching the given page size.
+    """
+    packet = io.BytesIO()
+    c = canvas.Canvas(packet, pagesize=(width, height))
+
+    # Compute font size from page diagonal (similar to your PyMuPDF logic)
+    diag = (width ** 2 + height ** 2) ** 0.5
+    fontsize = max(24, int(diag * WM_SCALE))
+
+    c.saveState()
+    c.translate(width / 2.0, height / 2.0)
+    c.rotate(WM_ROTATE)
+
+    # Very light gray; opacity approximated via light color
+    r, g, b = WM_COLOR
+    c.setFillColorRGB(r, g, b)
+    try:
+        # If available, use real transparency
+        c.setFillAlpha(WM_OPACITY)
+    except Exception:
+        # On older reportlab, this will just be ignored
+        pass
+
+    c.setFont(WM_FONT, fontsize)
+    c.drawCentredString(0, -fontsize / 4.0, WM_TEXT)
+    c.restoreState()
+
+    c.showPage()
+    c.save()
+
+    packet.seek(0)
+    wm_reader = PdfReader(packet)
+    return wm_reader.pages[0]
+
+
 # =========================
-# Watermark helper (PyMuPDF)
+# Watermark helper using pypdf
 # =========================
 def add_draft_watermark(pdf_bytes: bytes) -> bytes:
     """
-    Return new PDF bytes with a DRAFT watermark on every page:
-    - Diagonal bottom-left -> top-right (rotate=45°)
-    - Centered across the page
-    - Light gray with opacity
+    Return new PDF bytes with a DRAFT watermark on every page.
+    Implemented with pypdf + reportlab (no PyMuPDF).
     """
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    for page in doc:
-        rect = page.rect
+    reader = PdfReader(io.BytesIO(pdf_bytes))
+    writer = PdfWriter()
 
-        # Choose font size proportional to page diagonal
-        diag = (rect.width**2 + rect.height**2) ** 0.5
-        fontsize = max(24, int(diag * WM_SCALE))
+    for page in reader.pages:
+        width = float(page.mediabox.width)
+        height = float(page.mediabox.height)
 
-        # Insert centered, diagonal textbox spanning the whole page
-        page.insert_textbox(
-            rect,
-            WM_TEXT,
-            fontname=WM_FONT,
-            fontsize=fontsize,
-            color=WM_COLOR,
-            rotate=WM_ROTATE,     # 45° → bottom-left to top-right
-            align=1,              # centered
-            render_mode=0,        # fill
-            overlay=True,
-            opacity=WM_OPACITY,
-        )
+        wm_page = _create_watermark_page(width, height)
 
-    # Save to memory (basic options to avoid unnecessary changes)
+        # Overlay watermark on top of the existing page
+        page.merge_page(wm_page)
+        writer.add_page(page)
+
     out = io.BytesIO()
-    # garbage=0 (no object rewriting), deflate=False (don’t recompress streams)
-    doc.save(out, garbage=0, deflate=False)
-    doc.close()
+    writer.write(out)
+    out.seek(0)
     return out.getvalue()
+
 
 # =========================
 # Convert + Download UI
@@ -161,8 +193,7 @@ with st.expander("Watermark style & notes", expanded=False):
         - Text: **DRAFT**  
         - Angle: **45°** (bottom-left → top-right)  
         - Position: **Centered** on each page  
-        - Color: **Light gray** (RGB ~ 0.7)  
-        - Opacity: **0.12** (faded; adjust in code if needed)  
+        - Color: **Light gray**  
         - Font: Helvetica (built-in)
         """
     )
