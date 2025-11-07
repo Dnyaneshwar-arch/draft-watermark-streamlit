@@ -33,6 +33,7 @@ uploaded = st.file_uploader(
 
 too_many = False
 if uploaded and len(uploaded) > 50:
+    # This will appear in red, directly under the uploader
     st.error("Max 50 PDFs can be uploaded at once")
     too_many = True
 
