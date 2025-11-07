@@ -1,4 +1,7 @@
 # streamlit_app.py
+# NOTE: On Streamlit Cloud, also add runtime.txt with: 3.12
+# and requirements.txt with: streamlit, Pillow, PyMuPDF
+
 import io
 from zipfile import ZipFile, ZIP_DEFLATED
 
