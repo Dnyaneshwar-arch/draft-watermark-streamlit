@@ -4,18 +4,18 @@ import io
 from zipfile import ZipFile, ZIP_DEFLATED
 
 import streamlit as st
-from pypdf import PdfReader, PdfWriter
-from reportlab.pdfgen import canvas
+import fitz  # PyMuPDF
 
 # ============================
 # Watermark settings
 # ============================
 WM_TEXT = "DRAFT"
-WM_OPACITY = 0.12          # simulated via very light gray
-WM_COLOR = (0.7, 0.7, 0.7) # light gray (RGB 0–1)
+WM_OPACITY = 0.12          # faded
+WM_COLOR = (0.7, 0.7, 0.7) # light gray (0–1 RGB for PyMuPDF)
 WM_ROTATE = 45             # bottom-left to top-right
-WM_FONT = "Helvetica"      # built-in ReportLab font
-WM_SCALE = 0.18            # proportional to page diagonal (similar look)
+WM_FONT = "helv"           # built-in Helvetica
+WM_SCALE = 0.18            # proportional to page diagonal
+RASTER_ZOOM = 2.0          # 2.0–3.0 for higher JPG quality
 
 st.set_page_config(page_title="PDF → DRAFT Watermark", layout="centered")
 
@@ -30,7 +30,7 @@ st.caption(
 # ======================================================
 st.subheader("Upload PDFs (up to 50 at once)")
 uploaded = st.file_uploader(
-    label="",               # keeps the area tight
+    label="",
     type=["pdf"],
     accept_multiple_files=True,
     key="pdf_uploader",
@@ -38,89 +38,73 @@ uploaded = st.file_uploader(
 
 too_many = False
 if uploaded and len(uploaded) > 50:
-    # This appears in red directly under the uploader
     st.error("Max 50 PDFs can be uploaded at once")
     too_many = True
 
-# Show count (informational)
 if uploaded:
     st.caption(f"{len(uploaded)} selected")
 
-# Keep only when valid
 valid_files = uploaded if uploaded and not too_many else []
 
-# Store in session so we can disable/enable buttons cleanly
 if "pending_pdfs" not in st.session_state:
     st.session_state.pending_pdfs = []
 st.session_state.pending_pdfs = valid_files
 
 
-# ==================================
-# Helper: create a single watermark page
-# ==================================
-def _create_watermark_page(width: float, height: float):
+# =========================================
+# Helper: add DRAFT, then rasterize to PDF
+# =========================================
+def add_draft_and_rasterize(pdf_bytes: bytes) -> bytes:
     """
-    Build a single-page PDF (in memory) with a diagonal 'DRAFT'
-    watermark matching the given page size.
+    1) Open PDF
+    2) Add centered diagonal 'DRAFT' watermark on each page
+    3) Convert each watermarked page to JPG (high-res)
+    4) Rebuild a new PDF from those JPG pages
     """
-    packet = io.BytesIO()
-    c = canvas.Canvas(packet, pagesize=(width, height))
+    # ----- Step 1–2: watermark -----
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
 
-    # Compute font size from page diagonal (similar to your PyMuPDF logic)
-    diag = (width ** 2 + height ** 2) ** 0.5
-    fontsize = max(24, int(diag * WM_SCALE))
+    for page in doc:
+        rect = page.rect
+        diag = (rect.width ** 2 + rect.height ** 2) ** 0.5
+        fontsize = max(24, int(diag * WM_SCALE))
 
-    c.saveState()
-    c.translate(width / 2.0, height / 2.0)
-    c.rotate(WM_ROTATE)
+        page.insert_textbox(
+            rect,
+            WM_TEXT,
+            fontname=WM_FONT,
+            fontsize=fontsize,
+            color=WM_COLOR,
+            rotate=WM_ROTATE,  # 45°
+            align=1,           # centered
+            render_mode=0,     # fill
+            fill_opacity=WM_OPACITY,
+            overlay=True,
+        )
 
-    # Very light gray; opacity approximated via light color
-    r, g, b = WM_COLOR
-    c.setFillColorRGB(r, g, b)
-    try:
-        # If available, use real transparency
-        c.setFillAlpha(WM_OPACITY)
-    except Exception:
-        # On older reportlab, this will just be ignored
-        pass
+    # ----- Step 3–4: rasterize watermarked pages, rebuild PDF -----
+    out_doc = fitz.open()
+    zoom_mat = fitz.Matrix(RASTER_ZOOM, RASTER_ZOOM)
 
-    c.setFont(WM_FONT, fontsize)
-    c.drawCentredString(0, -fontsize / 4.0, WM_TEXT)
-    c.restoreState()
+    for page in doc:
+        # Render to high-res pixmap
+        pix = page.get_pixmap(matrix=zoom_mat, alpha=False)
+        img_bytes = pix.tobytes("jpeg")
 
-    c.showPage()
-    c.save()
+        # Create a one-page PDF from the JPG and append to out_doc
+        img_pdf = fitz.open()
+        rect = fitz.Rect(0, 0, pix.width, pix.height)
+        img_page = img_pdf.new_page(width=rect.width, height=rect.height)
+        img_page.insert_image(rect, stream=img_bytes)
+        out_doc.insert_pdf(img_pdf)
+        img_pdf.close()
 
-    packet.seek(0)
-    wm_reader = PdfReader(packet)
-    return wm_reader.pages[0]
+    doc.close()
 
-
-# =========================
-# Watermark helper using pypdf
-# =========================
-def add_draft_watermark(pdf_bytes: bytes) -> bytes:
-    """
-    Return new PDF bytes with a DRAFT watermark on every page.
-    Implemented with pypdf + reportlab (no PyMuPDF).
-    """
-    reader = PdfReader(io.BytesIO(pdf_bytes))
-    writer = PdfWriter()
-
-    for page in reader.pages:
-        width = float(page.mediabox.width)
-        height = float(page.mediabox.height)
-
-        wm_page = _create_watermark_page(width, height)
-
-        # Overlay watermark on top of the existing page
-        page.merge_page(wm_page)
-        writer.add_page(page)
-
-    out = io.BytesIO()
-    writer.write(out)
-    out.seek(0)
-    return out.getvalue()
+    out_buf = io.BytesIO()
+    out_doc.save(out_buf)
+    out_doc.close()
+    return out_buf.getvalue()
 
 
 # =========================
@@ -131,13 +115,12 @@ left, right = st.columns([1, 1])
 
 can_convert = bool(st.session_state.pending_pdfs) and not too_many
 convert = left.button(
-    "Convert to DRAFT (Preserve all details)",
+    "Convert to DRAFT (Rasterized to PDF)",
     disabled=not can_convert,
     type="primary",
     use_container_width=True,
 )
 
-# Server-side guard (never rely only on UI)
 if convert:
     pdfs = st.session_state.get("pending_pdfs", [])
     if len(pdfs) > 50:
@@ -145,23 +128,20 @@ if convert:
         st.stop()
 
     results = []
-    with st.spinner(f"Converting {len(pdfs)} PDF(s) to DRAFT…"):
+    with st.spinner(f"Processing {len(pdfs)} PDF(s)…"):
         for up in pdfs:
             name = up.name
             raw = up.read()
 
-            stamped = add_draft_watermark(raw)
-
-            # keep a tuple (filename, bytes)
-            safe_name = name.rsplit(".pdf", 1)[0] + "_DRAFT.pdf"
-            results.append((safe_name, stamped))
+            processed = add_draft_and_rasterize(raw)
+            safe_name = name.rsplit(".pdf", 1)[0] + "_DRAFT_RASTER.pdf"
+            results.append((safe_name, processed))
 
     if not results:
         st.error("No PDFs were processed.")
     else:
-        st.success(f"Converted {len(results)} PDF(s).")
+        st.success(f"Processed {len(results)} PDF(s).")
 
-        # Offer a ZIP download
         memzip = io.BytesIO()
         with ZipFile(memzip, "w", compression=ZIP_DEFLATED) as zf:
             for fname, data in results:
@@ -171,12 +151,11 @@ if convert:
         right.download_button(
             "Download all as ZIP",
             data=memzip,
-            file_name="watermarked_draft.zip",
+            file_name="watermarked_rasterized_pdfs.zip",
             mime="application/zip",
             use_container_width=True,
         )
 
-        # Also show individual file downloaders (optional)
         st.subheader("Individual files")
         for fname, data in results:
             st.download_button(
@@ -186,14 +165,15 @@ if convert:
                 mime="application/pdf",
             )
 
-# Small help block
 with st.expander("Watermark style & notes", expanded=False):
     st.write(
         """
         - Text: **DRAFT**  
         - Angle: **45°** (bottom-left → top-right)  
         - Position: **Centered** on each page  
-        - Color: **Light gray**  
-        - Font: Helvetica (built-in)
+        - Color: **Light gray** (RGB ~ 0.7)  
+        - Opacity: **0.12** (faded; via fill opacity)  
+        - Font: Helvetica (built-in)  
+        - Pages are rasterized to high-res JPG and rebuilt into a PDF.
         """
     )
