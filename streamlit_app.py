@@ -19,7 +19,8 @@ WM_ROTATE = 45             # bottom-left to top-right
 WM_FONT = "Helvetica"      # built-in ReportLab font
 WM_SCALE = 0.18            # proportional to page diagonal (similar look)
 
-RASTER_SCALE = 2.0         # 2.0–3.0 for sharper JPGs (bigger files)
+# Rasterization quality (higher = sharper, bigger files)
+RASTER_SCALE = 2.0         # 2.0–3.0 is usually good
 
 st.set_page_config(page_title="PDF → DRAFT Watermark", layout="centered")
 
@@ -131,13 +132,15 @@ def rasterize_pdf(pdf_bytes: bytes, scale: float = RASTER_SCALE) -> bytes:
     pil_images = []
     for page_index in range(len(pdf)):
         page = pdf[page_index]
-        pil_image = page.render_topil(scale=scale)
+        # Render the page and convert to a PIL image
+        bitmap = page.render(scale=scale)
+        pil_image = bitmap.to_pil()
         pil_images.append(pil_image)
 
     pdf.close()
 
     if not pil_images:
-        return pdf_bytes  # fallback: return original
+        return pdf_bytes  # fallback: return original if something went wrong
 
     out_buf = io.BytesIO()
     first, *rest = pil_images
