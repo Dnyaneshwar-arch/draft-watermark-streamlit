@@ -10,61 +10,39 @@ import pypdfium2 as pdfium
 from PIL import Image
 
 # ============================
-# Watermark settings
+# Global settings
 # ============================
+MAX_FILES = 50
+
+# Watermark settings
 WM_TEXT = "DRAFT"
 WM_OPACITY = 0.12          # simulated via very light gray
 WM_COLOR = (0.7, 0.7, 0.7) # light gray (RGB 0–1)
 WM_ROTATE = 45             # bottom-left to top-right
 WM_FONT = "Helvetica"      # built-in ReportLab font
-WM_SCALE = 0.18            # proportional to page diagonal (similar look)
+WM_SCALE = 0.18            # proportional to page diagonal
 
-# Rasterization quality (higher = sharper, bigger files)
-RASTER_SCALE = 2.0         # 2.0–3.0 is usually good
+# Rasterization settings for PDF → image
+RASTER_SCALE = 2.0         # 2.0–3.0 = sharper, bigger files
 
-st.set_page_config(page_title="PDF → DRAFT Watermark", layout="centered")
+st.set_page_config(page_title="DRAFT Watermark & Converters", layout="wide")
 
-st.title("TEST CERTIFICATE → DRAFT Watermark (PDF)")
-st.caption(
-    "Uploads: PDFs only • Up to **50** at a time • "
-    "Watermark is diagonal, centered, light gray, and faded."
-)
-
-# ======================================================
-# Upload (PDF only) + visible red message under uploader
-# ======================================================
-st.subheader("Upload PDFs (up to 50 at once)")
-uploaded = st.file_uploader(
-    label="",
-    type=["pdf"],
-    accept_multiple_files=True,
-    key="pdf_uploader",
-)
-
-too_many = False
-if uploaded and len(uploaded) > 50:
-    # This appears in red directly under the uploader
-    st.error("Max 50 PDFs can be uploaded at once")
-    too_many = True
-
-if uploaded:
-    st.caption(f"{len(uploaded)} selected")
-
-valid_files = uploaded if uploaded and not too_many else []
-
-if "pending_pdfs" not in st.session_state:
-    st.session_state.pending_pdfs = []
-st.session_state.pending_pdfs = valid_files
+# Init session state
+for key, default in [
+    ("pdf_files", []),            # list of dicts: {name, data}
+    ("pdf_image_results", []),    # list of dicts: {base, images:[(fname, bytes)]}
+    ("img_files", []),            # list of (name, bytes)
+    ("img_pdf_results", []),      # list of (pdf_name, bytes)
+]:
+    if key not in st.session_state:
+        st.session_state[key] = default
 
 
-# ==================================
-# Helper: create a single watermark page
-# ==================================
+# ============================
+# Watermark helpers (Section 1)
+# ============================
 def _create_watermark_page(width: float, height: float):
-    """
-    Build a single-page PDF (in memory) with a diagonal 'DRAFT'
-    watermark matching the given page size.
-    """
+    """Create a one-page PDF containing centered diagonal DRAFT text."""
     packet = io.BytesIO()
     c = canvas.Canvas(packet, pagesize=(width, height))
 
@@ -88,26 +66,20 @@ def _create_watermark_page(width: float, height: float):
 
     c.showPage()
     c.save()
-
     packet.seek(0)
+
     wm_reader = PdfReader(packet)
     return wm_reader.pages[0]
 
 
-# =========================
-# Step 1: add DRAFT watermark (pypdf + reportlab)
-# =========================
 def add_draft_watermark(pdf_bytes: bytes) -> bytes:
-    """
-    Return new PDF bytes with a DRAFT watermark on every page.
-    """
+    """Apply centered diagonal DRAFT watermark on every page."""
     reader = PdfReader(io.BytesIO(pdf_bytes))
     writer = PdfWriter()
 
     for page in reader.pages:
         width = float(page.mediabox.width)
         height = float(page.mediabox.height)
-
         wm_page = _create_watermark_page(width, height)
         page.merge_page(wm_page)
         writer.add_page(page)
@@ -118,111 +90,213 @@ def add_draft_watermark(pdf_bytes: bytes) -> bytes:
     return out.getvalue()
 
 
-# =========================
-# Step 2–3: rasterize watermarked PDF (pypdfium2 + Pillow)
-# =========================
-def rasterize_pdf(pdf_bytes: bytes, scale: float = RASTER_SCALE) -> bytes:
+def pdf_to_images(watermarked_pdf: bytes, base_name: str):
     """
-    Take a (watermarked) PDF in bytes:
-      - Render each page to a high-res image
-      - Rebuild a new PDF from those images
+    Convert a watermarked PDF into a list of (filename, jpg_bytes) for each page.
     """
-    pdf = pdfium.PdfDocument(pdf_bytes)
+    pdf = pdfium.PdfDocument(watermarked_pdf)
+    images = []
 
-    pil_images = []
-    for page_index in range(len(pdf)):
-        page = pdf[page_index]
-        # Render the page and convert to a PIL image
-        bitmap = page.render(scale=scale)
-        pil_image = bitmap.to_pil()
-        pil_images.append(pil_image)
+    for idx in range(len(pdf)):
+        page = pdf[idx]
+        bitmap = page.render(scale=RASTER_SCALE)
+        pil_img = bitmap.to_pil()
+        buf = io.BytesIO()
+        pil_img.save(buf, format="JPEG", quality=90)
+        buf.seek(0)
+        img_name = f"{base_name}_page_{idx+1:03d}.jpg"
+        images.append((img_name, buf.getvalue()))
 
     pdf.close()
+    return images
 
-    if not pil_images:
-        return pdf_bytes  # fallback: return original if something went wrong
 
-    out_buf = io.BytesIO()
-    first, *rest = pil_images
-    first.save(
-        out_buf,
-        format="PDF",
-        save_all=True,
-        append_images=rest,
+# ============================
+# Image → PDF helper (Section 2)
+# ============================
+def image_to_pdf(img_bytes: bytes, base_name: str):
+    """Convert a single image into a one-page PDF."""
+    img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+    out = io.BytesIO()
+    img.save(out, format="PDF")
+    out.seek(0)
+    pdf_name = f"{base_name}.pdf"
+    return pdf_name, out.getvalue()
+
+
+# ======================================================
+# Section 1: PDF Upload and Conversion
+# ======================================================
+st.header("Section 1: PDF Upload → DRAFT Watermark → Images")
+
+col_u, col_c, col_d = st.columns([2, 1, 1])
+
+with col_u:
+    st.subheader("Upload PDF")
+    uploaded_pdfs = st.file_uploader(
+        label="Upload PDF",
+        type=["pdf"],
+        accept_multiple_files=True,
+        key="pdf_uploader_section1",
     )
-    out_buf.seek(0)
-    return out_buf.getvalue()
+    if uploaded_pdfs and len(uploaded_pdfs) > MAX_FILES:
+        st.error(f"You can upload up to {MAX_FILES} attachments at a time.")
+        uploaded_pdfs = []
+    elif uploaded_pdfs:
+        # store raw bytes + name in session state
+        st.session_state.pdf_files = [
+            {"name": f.name, "data": f.read()} for f in uploaded_pdfs
+        ]
+    st.caption("You can upload up to 50 attachments at a time.")
 
+with col_c:
+    st.subheader("Convert")
+    convert_pdf_to_img = st.button(
+        "Convert DRAFT PDF to Image",
+        use_container_width=True,
+        disabled=not bool(st.session_state.pdf_files),
+    )
 
-# =========================
-# Convert + Download UI
-# =========================
-st.divider()
-left, right = st.columns([1, 1])
+with col_d:
+    st.subheader("Download")
+    # placeholder for download button; we fill after processing
+    download_pdf_images_placeholder = st.empty()
 
-can_convert = bool(st.session_state.pending_pdfs) and not too_many
-convert = left.button(
-    "Convert to DRAFT (Watermark → Image → PDF)",
-    disabled=not can_convert,
-    type="primary",
-    use_container_width=True,
-)
-
-if convert:
-    pdfs = st.session_state.get("pending_pdfs", [])
-    if len(pdfs) > 50:
-        st.error("Max 50 PDFs can be uploaded at once")
-        st.stop()
-
+# --- Conversion logic for Section 1 ---
+if convert_pdf_to_img:
     results = []
-    with st.spinner(f"Processing {len(pdfs)} PDF(s)…"):
-        for up in pdfs:
-            name = up.name
-            raw = up.read()
-
-            # Step 1: add DRAFT watermark
-            watermarked = add_draft_watermark(raw)
-
-            # Step 2–3: PDF → images → PDF
-            final_pdf = rasterize_pdf(watermarked)
-
-            safe_name = name.rsplit(".pdf", 1)[0] + "_DRAFT_IMAGE_PDF.pdf"
-            results.append((safe_name, final_pdf))
-
-    if not results:
-        st.error("No PDFs were processed.")
+    pdfs = st.session_state.pdf_files
+    if not pdfs:
+        st.warning("Please upload at least one PDF first.")
     else:
-        st.success(f"Processed {len(results)} PDF(s).")
+        with st.spinner(f"Processing {len(pdfs)} PDF(s)…"):
+            for item in pdfs:
+                name = item["name"]
+                data = item["data"]
+                base = name.rsplit(".pdf", 1)[0]
 
-        memzip = io.BytesIO()
-        with ZipFile(memzip, "w", compression=ZIP_DEFLATED) as zf:
-            for fname, data in results:
-                zf.writestr(fname, data)
-        memzip.seek(0)
+                watermarked = add_draft_watermark(data)
+                images = pdf_to_images(watermarked, base)
 
-        right.download_button(
-            "Download all as ZIP",
+                results.append({"base": base, "images": images})
+
+        st.session_state.pdf_image_results = results
+        st.success("Conversion to images completed. You can now download them.")
+
+# --- Download ZIP for Section 1 ---
+if st.session_state.pdf_image_results:
+    memzip = io.BytesIO()
+    with ZipFile(memzip, "w", compression=ZIP_DEFLATED) as zf:
+        for pdf_result in st.session_state.pdf_image_results:
+            folder = pdf_result["base"]
+            for fname, data in pdf_result["images"]:
+                # store each PDF's images inside its own folder in the ZIP
+                zf.writestr(f"{folder}/{fname}", data)
+    memzip.seek(0)
+
+    with col_d:
+        download_pdf_images_placeholder.download_button(
+            "Download",
             data=memzip,
-            file_name="watermarked_image_pdfs.zip",
+            file_name="draft_pdfs_as_images.zip",
             mime="application/zip",
             use_container_width=True,
         )
 
-        st.subheader("Individual files")
-        for fname, data in results:
-            st.download_button(
-                label=f"Download {fname}",
-                data=data,
-                file_name=fname,
-                mime="application/pdf",
-            )
+st.markdown("---")
 
-with st.expander("Watermark style & notes", expanded=False):
-    st.write(
-        """
-        - Step 1: Add **DRAFT** watermark (centered, 45°).  
-        - Step 2: Convert each watermarked page to a high-res image.  
-        - Step 3: Build a new PDF from those images.  
-        - Final PDF pages are images with the DRAFT visibly baked in.
-        """
+# ======================================================
+# Section 2: Image Upload and Conversion
+# ======================================================
+st.header("Section 2: Image Upload → PDF → ZIP")
+
+col_u2, col_c2, col_d2 = st.columns([2, 1, 1])
+
+with col_u2:
+    st.subheader("Upload Image / ZIP")
+    uploaded_imgs = st.file_uploader(
+        label="Upload Image(s) or ZIP",
+        type=["jpg", "jpeg", "png", "zip"],
+        accept_multiple_files=True,
+        key="img_uploader_section2",
     )
+
+    if uploaded_imgs and len(uploaded_imgs) > MAX_FILES:
+        st.error(f"You can upload up to {MAX_FILES} attachments at once.")
+        uploaded_imgs = []
+
+    img_list = []
+    if uploaded_imgs:
+        import zipfile
+
+        for f in uploaded_imgs:
+            name = f.name
+            data = f.read()
+
+            if name.lower().endswith(".zip"):
+                # extract images from the ZIP
+                zbuf = io.BytesIO(data)
+                with zipfile.ZipFile(zbuf, "r") as zf:
+                    for info in zf.infolist():
+                        if info.is_dir():
+                            continue
+                        if not info.filename.lower().endswith((".jpg", ".jpeg", ".png")):
+                            continue
+                        img_bytes = zf.read(info.filename)
+                        img_name = info.filename.split("/")[-1]
+                        img_list.append((img_name, img_bytes))
+            else:
+                img_list.append((name, data))
+
+        st.session_state.img_files = img_list
+
+    st.caption("You can upload up to 50 attachments at once. ZIP files with images are also supported.")
+
+with col_c2:
+    st.subheader("Convert")
+    convert_img_to_pdf = st.button(
+        "Convert to PDF",
+        use_container_width=True,
+        disabled=not bool(st.session_state.img_files),
+    )
+
+with col_d2:
+    st.subheader("Download")
+    download_img_pdfs_placeholder = st.empty()
+
+# --- Conversion logic for Section 2 ---
+if convert_img_to_pdf:
+    imgs = st.session_state.img_files
+    if not imgs:
+        st.warning("Please upload at least one image or ZIP first.")
+    else:
+        results = []
+        with st.spinner(f"Converting {len(imgs)} image(s) to PDF…"):
+            for name, data in imgs:
+                base = (
+                    name.rsplit(".", 1)[0]
+                    if "." in name
+                    else name
+                )
+                pdf_name, pdf_bytes = image_to_pdf(data, base)
+                results.append((pdf_name, pdf_bytes))
+
+        st.session_state.img_pdf_results = results
+        st.success("Image → PDF conversion completed. You can now download them.")
+
+# --- Download ZIP for Section 2 ---
+if st.session_state.img_pdf_results:
+    memzip2 = io.BytesIO()
+    with ZipFile(memzip2, "w", compression=ZIP_DEFLATED) as zf:
+        for fname, data in st.session_state.img_pdf_results:
+            zf.writestr(fname, data)
+    memzip2.seek(0)
+
+    with col_d2:
+        download_img_pdfs_placeholder.download_button(
+            "Download",
+            data=memzip2,
+            file_name="images_as_pdfs.zip",
+            mime="application/zip",
+            use_container_width=True,
+        )
